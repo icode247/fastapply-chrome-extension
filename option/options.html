@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>LinkedIn Job Application Assistant Options</title>
+  <link rel="stylesheet" type="text/css" href="styles/options.css">
+</head>
+<body>
+  <h1>User Details and Preferences</h1>
+  <form id="userDetailsForm">
+    <h2>Personal Information</h2>
+    <label for="firstName">First Name:</label>
+    <input type="text" id="firstName" name="firstName" required><br><br>
+    
+    <label for="lastName">Last Name:</label>
+    <input type="text" id="lastName" name="lastName" required><br><br>
+    
+    <label for="email">Email:</label>
+    <input type="email" id="email" name="email" required><br><br>
+    
+    <label for="phone">Phone:</label>
+    <input type="tel" id="phone" name="phone" required><br><br>
+    
+    <h2>Job Preferences</h2>
+    <label for="jobTitle">Desired Job Title:</label>
+    <input type="text" id="jobTitle" name="jobTitle" required><br><br>
+    
+    <label for="location">Preferred Location:</label>
+    <input type="text" id="location" name="location" required><br><br>
+    
+    <label for="jobType">Job Type:</label>
+    <select id="jobType" name="jobType" required>
+      <option value="fullTime">Full-time</option>
+      <option value="partTime">Part-time</option>
+      <option value="contract">Contract</option>
+      <option value="internship">Internship</option>
+    </select><br><br>
+    
+    <label for="experienceLevel">Experience Level:</label>
+    <select id="experienceLevel" name="experienceLevel" required>
+      <option value="entry">Entry Level</option>
+      <option value="associate">Associate</option>
+      <option value="mid-senior">Mid-Senior Level</option>
+      <option value="director">Director</option>
+      <option value="executive">Executive</option>
+    </select><br><br>
+    
+    <h2>Resume and Cover Letter</h2>
+    <label for="resume">Upload Resume (PDF):</label>
+    <input type="file" id="resume" name="resume" accept=".pdf" required><br><br>
+    
+    <label for="coverLetter">Cover Letter Template:</label>
+    <textarea id="coverLetter" name="coverLetter" rows="5" cols="50"></textarea><br><br>
+    
+    <button type="submit">Save</button>
+  </form>
+  <div id="status"></div>
+  <script src="options.js"></script>
+</body>
+</html>

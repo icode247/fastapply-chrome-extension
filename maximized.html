@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Maximized Extension Window</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100vw;
+        height: 100vh;
+        overflow-x: hidden;
+        overflow-y: auto;
+      }
+      #maximized-content {
+        width: 100%;
+        min-height: 100%;
+        background-color: #f0f0f0;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        align-items: center;
+        font-family: Arial, sans-serif;
+        padding: 20px;
+        box-sizing: border-box;
+      }
+      /* Webkit browsers like Chrome */
+      ::-webkit-scrollbar {
+        width: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #f1f1f1;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #888;
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #555;
+      }
+      /* Firefox */
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: #888 #f1f1f1;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="maximized-content">
+      <h1>Maximized Extension Window</h1>
+      <!-- Add more content here to test scrolling -->
+      <p>Content goes here...</p>
+      <!-- Repeat this many times to create scrollable content -->
+    </div>
+  </body>
+</html>
