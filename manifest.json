@@ -1,0 +1,104 @@
+{
+    "manifest_version": 3,
+    "name": "FastApply - Free AI Automated Job Application Copilot",
+    "version": "1.9",
+   "permissions": [
+        "activeTab",
+        "storage",
+        "scripting",
+        "tabs",
+        "alarms",
+        "power"
+    ],
+    "background": {
+        "type": "module",
+        "service_worker": "background.bundle.js"
+    },
+    "externally_connectable": {
+        "matches": [
+            "http://localhost:3000/*",
+            "http://localhost:3000/*/*",
+            "https://fastapply-adbs.vercel.app/*",
+            "https://fastapply-adbs.vercel.app/*/*",
+            "https://fastapply.co/*",
+            "https://fastapply.co/*/*"
+        ]
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://*.indeed.com/*"
+            ],
+            "js": [
+                "indeed/content.bundle.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://*.linkedin.com/*"
+            ],
+            "js": [
+                "linkedin/content.bundle.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://*.glassdoor.com/*"
+            ],
+            "js": [
+                "glassdoor/content.bundle.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://*.lever.co/*",
+                "https://www.google.com/search*"
+            ],
+            "js": [
+                "lever/content.bundle.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://*.workable.com/*",
+                "https://apply.workable.com/*"
+            ],
+            "js": [
+                "workable/content.bundle.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://*.monster.com/*"
+            ],
+            "js": [
+                "monster/content.bundle.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://*.recruitee.com/*"
+            ],
+            "js": [
+                "recruitee/content.bundle.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ],
+    "action": {},
+    "icons": {
+        "16": "icons/icon16.png",
+        "48": "icons/icon48.png",
+        "128": "icons/icon128.png",
+        "790": "icons/logo.png"
+    },
+    "host_permissions": [
+        "https://*.2captcha.com/*"
+    ]
+}
