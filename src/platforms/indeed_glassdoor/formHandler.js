@@ -1,6 +1,85 @@
 import { HOST } from "@shared/constants";
+
 //getValueForField
 //uploadFileFromURL
+
+/**
+ * Finds the best matching option from a list given an AI response.
+ * @param {string} aiValue - The AI's response.
+ * @param {Array<string>} optionLabels - Array of text labels for the options.
+ * @param {Array<HTMLElement>} optionElements - Array of the actual option HTML elements.
+ * @param {function} logger - Logger function for debugging.
+ * @returns {object|null} - The best matching option element and its label/value, or null if no good match.
+ */
+function findBestMatchingOptionUtilIndeedGlassdoor(aiValue, optionLabels, optionElements, logger = console.log) {
+  if (!aiValue || !optionLabels || optionLabels.length === 0 || !optionElements || optionElements.length !== optionLabels.length) {
+    logger("findBestMatchingOptionUtilIndeedGlassdoor: Invalid input parameters.");
+    return null;
+  }
+
+  const normalizedAIValue = String(aiValue).toLowerCase().trim();
+  // logger(`findBestMatchingOptionUtilIndeedGlassdoor: Normalized AI Value: "${normalizedAIValue}"`);
+
+  let bestMatch = null;
+  let highestScore = 0;
+
+  for (let i = 0; i < optionLabels.length; i++) {
+    const label = optionLabels[i];
+    const element = optionElements[i];
+    const normalizedOptionLabel = String(label).toLowerCase().trim();
+    let currentScore = 0;
+
+    // Exact match
+    if (normalizedOptionLabel === normalizedAIValue) {
+      currentScore = 1.0;
+    }
+    // AI value contains option label
+    else if (normalizedAIValue.includes(normalizedOptionLabel) && normalizedOptionLabel.length > 0) {
+      currentScore = 0.9 * (normalizedOptionLabel.length / normalizedAIValue.length);
+    }
+    // Option label contains AI value
+    else if (normalizedOptionLabel.includes(normalizedAIValue) && normalizedAIValue.length > 0) {
+      currentScore = 0.8 * (normalizedAIValue.length / normalizedOptionLabel.length);
+    } else {
+      // Word-based matching
+      const aiWords = normalizedAIValue.split(/\s+/).filter(w => w.length > 1);
+      const optionWords = normalizedOptionLabel.split(/\s+/).filter(w => w.length > 1);
+      if (aiWords.length > 0 && optionWords.length > 0) {
+        const commonWords = aiWords.filter(word => optionWords.includes(word)).length;
+        currentScore = (commonWords / Math.max(aiWords.length, optionWords.length)) * 0.7;
+      }
+    }
+
+    if ((normalizedAIValue === "yes" || normalizedAIValue === "true") && (normalizedOptionLabel === "yes" || normalizedOptionLabel === "true")) {
+      currentScore = Math.max(currentScore, 0.98);
+    }
+    if ((normalizedAIValue === "no" || normalizedAIValue === "false") && (normalizedOptionLabel === "no" || normalizedOptionLabel === "false")) {
+      currentScore = Math.max(currentScore, 0.98);
+    }
+    
+    if (currentScore < 0.6 && element.value && typeof element.value === 'string') {
+        const normalizedOptionValue = String(element.value).toLowerCase().trim();
+        if (normalizedOptionValue === normalizedAIValue && normalizedOptionValue !== normalizedOptionLabel) {
+            currentScore = Math.max(currentScore, 0.75);
+        }
+    }
+
+    if (currentScore > highestScore) {
+      highestScore = currentScore;
+      bestMatch = { element: element, value: element.value, label: label, score: highestScore };
+    }
+  }
+
+  const threshold = 0.55; 
+  if (bestMatch && highestScore >= threshold) {
+    // logger(`Best match selected: "${bestMatch.label}" (Value: ${bestMatch.value}, Score: ${bestMatch.score}) for AI value "${normalizedAIValue}"`);
+    return bestMatch;
+  }
+  // logger(`No suitable match found for "${normalizedAIValue}" above threshold ${threshold}. Highest score: ${highestScore}`);
+  return null;
+}
+
+
 /**
  * Enhanced FormHandler class for automated form filling on both Indeed and Glassdoor
  * Specifically handles the SmartApply interface (https://smartapply.indeed.com/...)
@@ -1395,91 +1474,26 @@ class FormHandler {
 
         if (!answer) {
           this.logger(`No answer received for question: "${questionText}"`);
-
-          // If no answer received and this is a required field, select the first option
-          if (
-            fieldset.getAttribute("aria-required") === "true" ||
-            fieldset.classList.contains("required")
-          ) {
-            if (radioInputs.length > 0) {
-              this.logger(
-                "Selecting first option as fallback for required field"
-              );
-              radioInputs[0].click();
-            }
+          if ( (fieldset.getAttribute("aria-required") === "true" || fieldset.classList.contains("required")) && radioInputs.length > 0) {
+            this.logger( "Selecting first option as fallback for required radio group");
+            radioInputs[0].click();
           }
           continue;
         }
+        
+        const bestMatch = findBestMatchingOptionUtilIndeedGlassdoor(answer, optionLabels, radioInputs, this.logger);
 
-        // Now find the matching radio button and select it
-        let foundMatch = false;
-        const normalizedAnswer = answer.toLowerCase().trim();
-
-        // First try exact match
-        if (optionMap.has(answer)) {
-          optionMap.get(answer).click();
-          this.logger(`Selected option: "${answer}" (exact match)`);
-          foundMatch = true;
+        if (bestMatch && bestMatch.element) {
+          bestMatch.element.click();
+          this.logger(`Selected option: "${bestMatch.label}" for question "${questionText}" based on AI answer "${answer}" (Score: ${bestMatch.score})`);
         } else {
-          // Try case-insensitive match
-          for (const [optionText, radio] of optionMap.entries()) {
-            if (optionText.toLowerCase() === normalizedAnswer) {
-              radio.click();
-              this.logger(
-                `Selected option: "${optionText}" (case-insensitive match)`
-              );
-              foundMatch = true;
-              break;
-            }
-          }
-
-          // If still no match, try partial match
-          if (!foundMatch) {
-            for (const [optionText, radio] of optionMap.entries()) {
-              if (
-                optionText.toLowerCase().includes(normalizedAnswer) ||
-                normalizedAnswer.includes(optionText.toLowerCase())
-              ) {
-                radio.click();
-                this.logger(`Selected option: "${optionText}" (partial match)`);
-                foundMatch = true;
-                break;
-              }
-            }
-
-            // Last resort - try select an option if it contains key words from the answer
-            if (!foundMatch) {
-              const answerWords = normalizedAnswer.split(/\s+/);
-              for (const [optionText, radio] of optionMap.entries()) {
-                const optionLower = optionText.toLowerCase();
-                for (const word of answerWords) {
-                  if (word.length > 3 && optionLower.includes(word)) {
-                    radio.click();
-                    this.logger(
-                      `Selected option: "${optionText}" (keyword match with "${word}")`
-                    );
-                    foundMatch = true;
-                    break;
-                  }
-                }
-                if (foundMatch) break;
-              }
-            }
-          }
-        }
-
-        if (!foundMatch) {
-          this.logger(
-            `Could not find matching option for answer: "${answer}" - selecting first option as fallback`
-          );
-          // Select first option as fallback
-          if (radioInputs.length > 0) {
+          this.logger(`Could not find a suitable match for AI answer "${answer}" for radio group "${questionText}".`);
+          // Fallback: if required, select the first option.
+          if ((fieldset.getAttribute("aria-required") === "true" || fieldset.classList.contains("required")) && radioInputs.length > 0 ) {
+            this.logger(`Fallback: Selecting first option for required radio group "${questionText}" as no match found for AI answer.`);
             radioInputs[0].click();
-            this.logger(`Selected first option as fallback`);
           }
         }
-
-        // Mark fieldset as processed
         fieldset.dataset.processed = "true";
       }
 

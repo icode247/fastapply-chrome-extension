@@ -63,7 +63,98 @@ const CONFIG = {
   DEBUG: true,
   BRAND_COLOR: "#4a90e2", // FastApply brand blue
 };
+
 //process
+
+/**
+ * Finds the best matching option from a list given an AI response.
+ * @param {string} aiValue - The AI's response.
+ * @param {Array<string>} optionLabels - Array of text labels for the options.
+ * @param {Array<HTMLElement>} optionElements - Array of the actual option HTML elements (radio inputs or select options).
+ * @param {function} logger - Logger function for debugging.
+ * @returns {object|null} - The best matching option element and its label/value, or null if no good match.
+ */
+function findBestMatchingOptionUtil(aiValue, optionLabels, optionElements, logger = console.log) {
+  if (!aiValue || !optionLabels || optionLabels.length === 0 || !optionElements || optionElements.length !== optionLabels.length) {
+    logger("findBestMatchingOptionUtil: Invalid input parameters.");
+    return null;
+  }
+
+  const normalizedAIValue = String(aiValue).toLowerCase().trim();
+  logger(`findBestMatchingOptionUtil: Normalized AI Value: "${normalizedAIValue}"`);
+
+  let bestMatch = null;
+  let highestScore = 0;
+
+  for (let i = 0; i < optionLabels.length; i++) {
+    const label = optionLabels[i];
+    const element = optionElements[i]; // This is the actual HTML element
+    const normalizedOptionLabel = String(label).toLowerCase().trim();
+    let currentScore = 0;
+
+    // logger(`Comparing with option: "${normalizedOptionLabel}" (Element value: ${element.value})`);
+
+    // Exact match
+    if (normalizedOptionLabel === normalizedAIValue) {
+      currentScore = 1.0;
+      // logger(`Exact match for "${normalizedOptionLabel}" (Score: ${currentScore})`);
+    }
+    // AI value contains option label (e.g., AI: "Yes, I agree", Option: "Yes")
+    else if (normalizedAIValue.includes(normalizedOptionLabel) && normalizedOptionLabel.length > 0) {
+      currentScore = 0.9 * (normalizedOptionLabel.length / normalizedAIValue.length); // Proximity score
+      // logger(`AI value includes option "${normalizedOptionLabel}" (Score: ${currentScore})`);
+    }
+    // Option label contains AI value (e.g., AI: "Male", Option: "Male (He/Him)")
+    else if (normalizedOptionLabel.includes(normalizedAIValue) && normalizedAIValue.length > 0) {
+      currentScore = 0.8 * (normalizedAIValue.length / normalizedOptionLabel.length); // Proximity score
+      // logger(`Option "${normalizedOptionLabel}" includes AI value (Score: ${currentScore})`);
+    } else {
+      // Word-based matching
+      const aiWords = normalizedAIValue.split(/\s+/).filter(w => w.length > 1); // Ignore very short words
+      const optionWords = normalizedOptionLabel.split(/\s+/).filter(w => w.length > 1);
+      if (aiWords.length > 0 && optionWords.length > 0) {
+        const commonWords = aiWords.filter(word => optionWords.includes(word)).length;
+        currentScore = (commonWords / Math.max(aiWords.length, optionWords.length)) * 0.7; // Base score for word match
+        // logger(`Word match for "${normalizedOptionLabel}": ${commonWords} common (Score: ${currentScore})`);
+      }
+    }
+
+    // Boost score for "yes"/"no" type direct matches, especially if the option itself is simple "yes" or "no"
+    if ((normalizedAIValue === "yes" || normalizedAIValue === "true") && (normalizedOptionLabel === "yes" || normalizedOptionLabel === "true")) {
+      currentScore = Math.max(currentScore, 0.98); 
+      // logger(`Boosted "yes" match for "${normalizedOptionLabel}" (Score: ${currentScore})`);
+    }
+    if ((normalizedAIValue === "no" || normalizedAIValue === "false") && (normalizedOptionLabel === "no" || normalizedOptionLabel === "false")) {
+      currentScore = Math.max(currentScore, 0.98);
+      // logger(`Boosted "no" match for "${normalizedOptionLabel}" (Score: ${currentScore})`);
+    }
+    
+    // Consider element value as well, if label match is weak and element has a distinct value property
+    if (currentScore < 0.6 && element.value && typeof element.value === 'string') {
+        const normalizedOptionValue = String(element.value).toLowerCase().trim();
+        if (normalizedOptionValue === normalizedAIValue && normalizedOptionValue !== normalizedOptionLabel) { // only if value offers new info
+            currentScore = Math.max(currentScore, 0.75); // Match by value is decent
+            // logger(`Matched by element value "${normalizedOptionValue}" (Score: ${currentScore})`);
+        }
+    }
+
+    if (currentScore > highestScore) {
+      highestScore = currentScore;
+      // Store the element itself, its value, and its label for clarity
+      bestMatch = { element: element, value: element.value, label: label, score: highestScore };
+    }
+  }
+
+  const threshold = 0.55; 
+  if (bestMatch && highestScore >= threshold) {
+    logger(`Best match selected: "${bestMatch.label}" (Value: ${bestMatch.value}, Score: ${bestMatch.score}) for AI value "${normalizedAIValue}"`);
+    return bestMatch;
+  }
+  logger(`No suitable match found for "${normalizedAIValue}" above threshold ${threshold}. Highest score: ${highestScore}`);
+  return null;
+}
+
+
 /**
  * LeverJobAutomation - Content script for automating Lever job applications
  * Improved with reliable communication system using long-lived connections
@@ -1586,32 +1677,159 @@ class LeverJobAutomation {
 
   async handleRequiredCheckboxes(form, profile) {
     try {
-      this.appendStatusMessage("Checking required checkboxes");
+      this.appendStatusMessage("Processing checkboxes (AI Priority)");
 
-      // First identify checkbox groups to handle them differently
       const checkboxGroups = this.identifyCheckboxGroups(form);
-
-      // Process checkbox groups (like pronouns, ethnicity, etc.)
       for (const group of checkboxGroups) {
-        await this.handleCheckboxGroup(group, profile);
+        await this.handleCheckboxGroupAI(group, profile); // AI-first version
       }
 
-      // Find individual checkboxes (not part of groups)
-      const individual = this.getIndividualCheckboxes(form, checkboxGroups);
-
-      // Process individual checkboxes
-      for (const checkbox of individual) {
-        await this.handleIndividualCheckbox(checkbox, profile);
+      const individualCheckboxes = this.getIndividualCheckboxes(form, checkboxGroups);
+      for (const checkbox of individualCheckboxes) {
+        await this.handleIndividualCheckboxAI(checkbox, profile); // AI-first version
       }
     } catch (error) {
-      debugLog("Error handling checkboxes:", error);
+      debugLog("Error handling checkboxes (AI Priority):", error);
       this.appendStatusMessage(
-        `Warning: Some checkboxes may not have been processed correctly - ${error.message}`
+        `Warning: Error processing checkboxes - ${error.message}`
       );
     }
   }
 
-  // Identify checkbox groups on the page
+
+  // AI-first version of handleCheckboxGroup
+  async handleCheckboxGroupAI(group, profile) {
+    try {
+      this.appendStatusMessage(`AI Processing checkbox group: "${group.label}"`);
+      const optionLabels = group.checkboxes.map((checkbox) => {
+        const label = checkbox.closest("label");
+        return (label?.querySelector("span")?.textContent.trim() || label?.textContent.trim() || checkbox.value);
+      });
+
+      if (optionLabels.length === 0) {
+        this.appendStatusMessage("No options in group, skipping.");
+        return;
+      }
+      this.appendStatusMessage(`Group options: ${optionLabels.join(", ")}`);
+
+      let aiAnswer = null;
+      try {
+        aiAnswer = await this.getAnswer(group.label, optionLabels, profile);
+        this.appendStatusMessage(`AI response for group "${group.label}": ${aiAnswer}`);
+      } catch (error) {
+        debugLog(`AI error for checkbox group "${group.label}": ${error.message}`);
+        this.appendStatusMessage(`AI error for "${group.label}", considering fallback.`);
+      }
+
+      if (aiAnswer) {
+        // Check if AI suggests multiple options (e.g., comma-separated)
+        const aiSelectedOptions = aiAnswer.split(',').map(s => s.trim()).filter(s => s.length > 0);
+        let matchedSomething = false;
+
+        for (const aiSelectedOption of aiSelectedOptions) {
+            const bestMatch = findBestMatchingOptionUtil(aiSelectedOption, optionLabels, group.checkboxes, this.appendStatusMessage.bind(this));
+            if (bestMatch && bestMatch.element) {
+                this.appendStatusMessage(`AI matched option "${bestMatch.label || bestMatch.value}" for group "${group.label}" based on AI sub-answer "${aiSelectedOption}"`);
+                await this.checkSpecificOption(group.checkboxes, bestMatch.label || bestMatch.value); // Pass label to checkSpecificOption
+                matchedSomething = true;
+            }
+        }
+        if (matchedSomething) return; // AI handled this group
+
+        this.appendStatusMessage(`AI answer "${aiAnswer}" did not map to any option for "${group.label}".`);
+      }
+      
+      // Fallback (only if AI fails or provides no actionable answer)
+      this.appendStatusMessage(`Using fallback for group "${group.label}".`);
+      const isDemographic = this.isDemographicQuestion(group.label);
+      if (isDemographic) {
+        const declineOptionMatch = findBestMatchingOptionUtil("Prefer not to say", optionLabels, group.checkboxes, this.appendStatusMessage.bind(this)) ||
+                                  findBestMatchingOptionUtil("Decline to self-identify", optionLabels, group.checkboxes, this.appendStatusMessage.bind(this));
+        if (declineOptionMatch && declineOptionMatch.element) {
+             this.appendStatusMessage(`Fallback: Demographic group -> selecting "${declineOptionMatch.label || declineOptionMatch.value}"`);
+             await this.checkSpecificOption(group.checkboxes, declineOptionMatch.label || declineOptionMatch.value);
+        } else {
+            this.appendStatusMessage(`Fallback: No "Prefer not to say" for demographic group "${group.label}". Skipping.`);
+        }
+      } else {
+        this.appendStatusMessage(`No specific fallback for group "${group.label}". Group may remain unchanged.`);
+      }
+
+    } catch (error) {
+      debugLog(`Error in handleCheckboxGroupAI for "${group.label}": ${error.message}`);
+    }
+  }
+
+  // AI-first version of handleIndividualCheckbox
+  async handleIndividualCheckboxAI(checkbox, profile) {
+    try {
+      if (checkbox.checked || !this.isElementVisible(checkbox)) return;
+
+      const labelEl = checkbox.closest("label") || document.querySelector(`label[for="${checkbox.id}"]`);
+      let checkboxText = labelEl ? labelEl.textContent.trim().replace(/✱$/, "").trim() : (checkbox.name || checkbox.id);
+      
+      if (!checkboxText && checkbox.parentElement) { // Try parent's text if label is missing
+          checkboxText = checkbox.parentElement.textContent.trim().replace(/✱$/, "").trim();
+      }
+      checkboxText = checkboxText || "Unnamed checkbox";
+
+
+      if (!checkboxText) {
+        debugLog("No text for individual checkbox, skipping.");
+        return;
+      }
+      this.appendStatusMessage(`AI Processing checkbox: "${checkboxText.substring(0,50)}..."`);
+
+      let aiDecision = null;
+      try {
+        const aiAnswer = await this.getAnswer(
+          `Should the checkbox "${checkboxText}" be checked? (Answer Yes or No)`,
+          ["Yes", "No"], // Provide simple options for AI
+          profile
+        );
+        this.appendStatusMessage(`AI response for checkbox "${checkboxText}": "${aiAnswer}"`);
+        if (aiAnswer) {
+          const normalizedAiAnswer = aiAnswer.toLowerCase();
+          if (normalizedAiAnswer.includes("yes") || normalizedAiAnswer.includes("true") || normalizedAiAnswer.includes("check it") || normalizedAiAnswer.includes("agree") || normalizedAiAnswer.includes("confirm")) {
+            aiDecision = true;
+          } else if (normalizedAiAnswer.includes("no") || normalizedAiAnswer.includes("false") || normalizedAiAnswer.includes("leave it unchecked") || normalizedAiAnswer.includes("decline")) {
+            aiDecision = false;
+          }
+        }
+      } catch (error) {
+        debugLog(`AI error for checkbox "${checkboxText}": ${error.message}`);
+        this.appendStatusMessage(`AI error for "${checkboxText}", considering fallback.`);
+      }
+
+      if (aiDecision === true) {
+        this.appendStatusMessage(`AI: Checkbox "${checkboxText}" -> CHECK`);
+        await this.checkIndividualCheckbox(checkbox, labelEl);
+      } else if (aiDecision === false) {
+        this.appendStatusMessage(`AI: Checkbox "${checkboxText}" -> UNCHECK (leaving as is)`);
+      } else {
+        // Fallback: Only check if it seems like a required consent/terms
+        this.appendStatusMessage(`Using fallback for checkbox "${checkboxText}".`);
+        const checkboxLower = checkboxText.toLowerCase();
+        const isConsent = checkboxLower.includes("agree") || checkboxLower.includes("consent") || 
+                          checkboxLower.includes("terms") || checkboxLower.includes("privacy policy") ||
+                          checkboxLower.includes("acknowledge") || checkboxLower.includes("confirm");
+         const isRequiredByAttr = checkbox.hasAttribute("required") || 
+                           checkbox.getAttribute("aria-required") === "true" || 
+                           (labelEl && (labelEl.textContent.includes("*") || labelEl.classList.contains("required")));
+
+        if (isConsent || isRequiredByAttr) { // Check if it's a consent type OR explicitly marked required
+          this.appendStatusMessage(`Fallback: Checking consent/required checkbox "${checkboxText}".`);
+          await this.checkIndividualCheckbox(checkbox, labelEl);
+        } else {
+           this.appendStatusMessage(`Fallback: Checkbox "${checkboxText}" is not a clear consent/required type. Leaving as is.`);
+        }
+      }
+    } catch (error) {
+      debugLog(`Error in handleIndividualCheckboxAI for "${checkboxText}": ${error.message}`);
+    }
+  }
+  
+  // Identify checkbox groups on the page (existing method, ensure it's robust)
   identifyCheckboxGroups(form) {
     const groups = [];
 
@@ -1736,119 +1954,7 @@ class LeverJobAutomation {
     );
   }
 
-  // Handle checkbox groups (pronouns, ethnicity, etc.)
-  async handleCheckboxGroup(group, profile) {
-    try {
-      this.appendStatusMessage(`Processing checkbox group: "${group.label}"`);
-
-      // Extract options from the group
-      const options = group.checkboxes.map((checkbox) => {
-        const label = checkbox.closest("label");
-        const span = label?.querySelector("span");
-        return span
-          ? span.textContent.trim()
-          : label?.textContent.trim() || checkbox.value;
-      });
-
-      // Skip empty groups
-      if (options.length === 0) {
-        this.appendStatusMessage("No options found in group, skipping");
-        return;
-      }
-
-      this.appendStatusMessage(`Group options: ${options.join(", ")}`);
-
-      // Special case: If this is an EEO/demographic question with "Prefer not to say"
-      const isDemographic = this.isDemographicQuestion(group.label);
-      const hasDeclineOption = options.some(
-        (opt) =>
-          opt.toLowerCase().includes("prefer not") ||
-          opt.toLowerCase().includes("decline to") ||
-          opt.toLowerCase().includes("do not wish to")
-      );
-
-      if (isDemographic && hasDeclineOption) {
-        // For demographic questions, select "Prefer not to say" option
-        const declineOption = options.find(
-          (opt) =>
-            opt.toLowerCase().includes("prefer not") ||
-            opt.toLowerCase().includes("decline to") ||
-            opt.toLowerCase().includes("do not wish to")
-        );
-
-        if (declineOption) {
-          this.appendStatusMessage(
-            `Demographic question detected, selecting "${declineOption}"`
-          );
-          await this.checkSpecificOption(group.checkboxes, declineOption);
-          return;
-        }
-      }
-
-      // For all other groups, ask AI what to select
-      try {
-        // Get answer from AI
-        const answer = await this.getAnswer(group.label, options, profile);
-        this.appendStatusMessage(`AI recommendation: ${answer}`);
-
-        // Parse the answer - could be multiple selections
-        const selectedOptions = this.parseSelectedOptions(answer, options);
-
-        if (selectedOptions.length > 0) {
-          for (const option of selectedOptions) {
-            await this.checkSpecificOption(group.checkboxes, option);
-          }
-        } else {
-          this.appendStatusMessage("No specific options selected by AI");
-        }
-      } catch (error) {
-        debugLog(
-          `Error getting AI answer for checkbox group: ${error.message}`
-        );
-
-        // Fallback logic for specific group types
-        if (isDemographic) {
-          // For demographic questions, try to find a "prefer not to say" option
-          const preferOption = options.find(
-            (opt) =>
-              opt.toLowerCase().includes("prefer not") ||
-              opt.toLowerCase().includes("decline")
-          );
-
-          if (preferOption) {
-            this.appendStatusMessage(
-              `Fallback: Selecting "${preferOption}" for demographic question`
-            );
-            await this.checkSpecificOption(group.checkboxes, preferOption);
-          }
-        } else if (group.label.toLowerCase().includes("pronoun")) {
-          // For pronouns, use profile gender if available
-          if (profile.gender) {
-            const genderMap = {
-              male: "He/him",
-              female: "She/her",
-              "non-binary": "They/them",
-            };
-
-            const pronounOption = genderMap[profile.gender.toLowerCase()];
-            if (pronounOption && options.includes(pronounOption)) {
-              this.appendStatusMessage(
-                `Fallback: Selecting "${pronounOption}" based on profile gender`
-              );
-              await this.checkSpecificOption(group.checkboxes, pronounOption);
-            }
-          }
-        }
-        // Leave other groups unchecked by default
-      }
-    } catch (error) {
-      debugLog(
-        `Error handling checkbox group "${group.label}": ${error.message}`
-      );
-    }
-  }
-
-  // Check if a question is demographic in nature
+  // Check if a question is demographic in nature (existing method)
   isDemographicQuestion(question) {
     if (!question) return false;
 
@@ -1934,90 +2040,7 @@ class LeverJobAutomation {
     return false;
   }
 
-  // Handle individual checkboxes (not part of groups)
-  async handleIndividualCheckbox(checkbox, profile) {
-    try {
-      // Skip if already checked or not visible
-      if (
-        checkbox.checked ||
-        checkbox.offsetParent === null ||
-        checkbox.style.display === "none" ||
-        checkbox.style.visibility === "hidden"
-      ) {
-        return;
-      }
-
-      // Get checkbox label
-      const label =
-        checkbox.closest("label") ||
-        document.querySelector(`label[for="${checkbox.id}"]`);
-      const checkboxText = label ? label.textContent.trim() : "";
-
-      if (!checkboxText) {
-        debugLog("No text found for individual checkbox, skipping");
-        return;
-      }
-
-      this.appendStatusMessage(
-        `Processing individual checkbox: "${checkboxText.substring(0, 50)}${
-          checkboxText.length > 50 ? "..." : ""
-        }"`
-      );
-
-      // Check if required by attributes
-      const isRequired =
-        checkbox.hasAttribute("required") ||
-        checkbox.getAttribute("aria-required") === "true" ||
-        checkbox.classList.contains("required") ||
-        checkboxText.includes("*") ||
-        checkbox.closest(".required-field") !== null;
-
-      if (isRequired) {
-        this.appendStatusMessage("Checkbox is required, checking it");
-        await this.checkIndividualCheckbox(checkbox, label);
-        return;
-      }
-
-      // Get AI recommendation for this checkbox
-      try {
-        const options = ["Yes (check the box)", "No (leave unchecked)"];
-        const question = `Should I check this checkbox in a job application? The checkbox says: "${checkboxText}"`;
-
-        const answer = await this.getAnswer(question, options, profile);
-        const shouldCheck = answer.toLowerCase().includes("yes");
-
-        if (shouldCheck) {
-          this.appendStatusMessage("AI recommends checking this box");
-          await this.checkIndividualCheckbox(checkbox, label);
-        } else {
-          this.appendStatusMessage("AI recommends leaving this box unchecked");
-        }
-      } catch (error) {
-        debugLog(
-          `Error getting AI answer for individual checkbox: ${error.message}`
-        );
-
-        // Conservative fallback: only check legal requirements
-        const checkboxLower = checkboxText.toLowerCase();
-        const isLegalRequirement =
-          (checkboxLower.includes("terms") &&
-            checkboxLower.includes("conditions")) ||
-          (checkboxLower.includes("privacy") &&
-            checkboxLower.includes("policy"));
-
-        if (isLegalRequirement) {
-          this.appendStatusMessage(
-            "Fallback: Checking legal requirement checkbox"
-          );
-          await this.checkIndividualCheckbox(checkbox, label);
-        }
-      }
-    } catch (error) {
-      debugLog(`Error handling individual checkbox: ${error.message}`);
-    }
-  }
-
-  // Check an individual checkbox
+  // Check an individual checkbox (existing method)
   async checkIndividualCheckbox(checkbox, label) {
     try {
       // Scroll to the checkbox
@@ -4061,215 +4084,128 @@ class LeverJobAutomation {
 
   async handleLeverRadioButtons(form, profile) {
     try {
-      this.appendStatusMessage("Processing radio button fields");
+      this.appendStatusMessage("Processing radio button fields (AI Priority)");
 
-      // Extract template data for better understanding of radio fields
-      const templateData = this.extractLeverTemplateData(form);
-
-      // Find all multiple-choice question containers
       const radioGroups = form.querySelectorAll(
         '.application-question ul[data-qa="multiple-choice"]'
       );
 
       for (const radioGroup of radioGroups) {
-        // Find the parent question container
         const questionContainer = radioGroup.closest(".application-question");
         if (!questionContainer) continue;
 
-        // Get the question text
         const questionEl = questionContainer.querySelector(
           ".application-label .text"
         );
         if (!questionEl) continue;
 
-        // Clean up the question text (remove the required asterisk)
         const questionText = questionEl.textContent.replace(/✱$/, "").trim();
-
-        // Find the radio inputs in this group
-        const radioInputs = radioGroup.querySelectorAll('input[type="radio"]');
+        const radioInputs = Array.from(radioGroup.querySelectorAll('input[type="radio"]'));
         if (!radioInputs.length) continue;
 
-        // Get the name of the first radio which identifies the group
-        const radioName = radioInputs[0].name;
-
-        // Get radio options for passing to getAnswer
-        const radioOptions = Array.from(radioInputs).map((input) => {
+        const radioOptionLabels = radioInputs.map((input) => {
           const label = input.closest("label");
           return label ? label.textContent.trim() : input.value;
         });
 
         this.appendStatusMessage(
-          `Radio question: "${questionText}" with options: ${radioOptions.join(
-            ", "
-          )}`
+          `Radio Q: "${questionText}" (Options: ${radioOptionLabels.join(", ")})`
         );
 
-        // Decide what value to use for this radio group
-        let selectedValue = null;
-        console.log("RADIO OPTIONS", radioOptions);
-        // First try to get answer from AI
+        let selectedRadioElement = null;
+        let aiAnswer = null;
+
         try {
-          // Use getAnswer to get the appropriate value
-          const answer = await this.getAnswer(
+          aiAnswer = await this.getAnswer(
             questionText,
-            radioOptions,
+            radioOptionLabels,
             profile
           );
+          this.appendStatusMessage(
+            `AI response for "${questionText}": "${aiAnswer}"`
+          );
 
-          // Try to match the answer to one of the radio values or labels
-          for (const radio of radioInputs) {
-            const label = radio.closest("label");
-            const labelText = label ? label.textContent.trim() : "";
-
-            if (
-              radio.value === answer ||
-              labelText.toLowerCase() === answer.toLowerCase() ||
-              labelText.includes(answer) ||
-              answer.includes(labelText)
-            ) {
-              selectedValue = radio.value;
+          if (aiAnswer) {
+            const bestMatch = findBestMatchingOptionUtil(
+              aiAnswer,
+              radioOptionLabels,
+              radioInputs, // Pass the actual radio input elements
+              this.appendStatusMessage.bind(this)
+            );
+            if (bestMatch) {
+              selectedRadioElement = bestMatch.element;
               this.appendStatusMessage(
-                `AI selected value: ${selectedValue} for question "${questionText}"`
+                `AI selected option: "${bestMatch.label || bestMatch.value}" (Value: ${bestMatch.value}, Score: ${bestMatch.score}) for "${questionText}"`
               );
-              break;
+            } else {
+              this.appendStatusMessage(
+                `AI answer "${aiAnswer}" did not robustly match any option for "${questionText}".`
+              );
             }
           }
         } catch (error) {
-          debugLog(`Error getting AI answer for radio group: ${error.message}`);
-          // Continue to fallback logic
+          debugLog(
+            `Error getting AI answer for radio group "${questionText}": ${error.message}`
+          );
+          this.appendStatusMessage(
+            `AI error for "${questionText}", using fallback.`
+          );
         }
 
-        // If AI didn't provide a suitable answer, use fallback logic
-        if (!selectedValue) {
-          this.appendStatusMessage("Using fallback logic for radio selection");
-
-          // Handle critical compliance fields with default values
+        // Fallback logic only if AI fails or provides no clear match
+        if (!selectedRadioElement) {
+          this.appendStatusMessage(
+            `Using fallback logic for radio "${questionText}"`
+          );
+          const questionLower = questionText.toLowerCase();
           if (
-            questionText.includes("legally authorized to work") ||
-            questionText.toLowerCase().includes("authorized") ||
-            questionText.toLowerCase().includes("eligible to work")
+            questionLower.includes("authorized to work") ||
+            questionLower.includes("eligible to work")
           ) {
-            selectedValue = this.getRadioValueByLabel(radioInputs, "Yes");
-            this.appendStatusMessage(`Setting work authorization to: Yes`);
-          } else if (questionText.includes("require sponsorship")) {
-            selectedValue = this.getRadioValueByLabel(radioInputs, "No");
-            this.appendStatusMessage(`Setting visa sponsorship to: No`);
-          } else if (
-            questionText.toLowerCase().includes("criminal") ||
-            questionText.toLowerCase().includes("convicted")
-          ) {
-            selectedValue = this.getRadioValueByLabel(radioInputs, "No");
-            this.appendStatusMessage(`Setting criminal history to: No`);
-          } else if (
-            questionText.toLowerCase().includes("background check") ||
-            questionText.toLowerCase().includes("background screening") ||
-            questionText.toLowerCase().includes("privacy") ||
-            questionText.toLowerCase().includes("terms and conditions") ||
-            questionText.toLowerCase().includes("18 years")
-          ) {
-            selectedValue = this.getRadioValueByLabel(radioInputs, "Yes");
-            this.appendStatusMessage(`Setting consent field to: Yes`);
-          }
-          // Check template data
-          else if (templateData[radioName]) {
-            const fieldInfo = templateData[radioName];
-
-            // For generic yes/no questions, default to Yes for positive questions
-            // and No for negative questions
-            if (
-              fieldInfo.type === "multiple-choice" &&
-              fieldInfo.options.length === 2 &&
-              fieldInfo.options.some((opt) => opt.text === "Yes") &&
-              fieldInfo.options.some((opt) => opt.text === "No")
-            ) {
-              // Check if question contains negative words
-              const negativeWords = [
-                "not",
-                "criminal",
-                "felony",
-                "misdemeanor",
-                "convict",
-              ];
-              const isNegativeQuestion = negativeWords.some((word) =>
-                questionText.toLowerCase().includes(word)
-              );
-
-              selectedValue = this.getRadioValueByLabel(
-                radioInputs,
-                isNegativeQuestion ? "No" : "Yes"
-              );
-              this.appendStatusMessage(
-                `Setting ${questionText} to: ${
-                  isNegativeQuestion ? "No" : "Yes"
-                } (default assumption)`
-              );
-            }
-          }
-
-          // If we still couldn't determine a value, default to first option
-          if (!selectedValue && radioInputs.length > 0) {
-            selectedValue = radioInputs[0].value;
+            const yesOption = findBestMatchingOptionUtil("Yes", radioOptionLabels, radioInputs, this.appendStatusMessage.bind(this));
+            if (yesOption) selectedRadioElement = yesOption.element;
+            this.appendStatusMessage(`Fallback: Work authorization -> Yes (if available)`);
+          } else if (questionLower.includes("sponsorship")) {
+            const noOption = findBestMatchingOptionUtil("No", radioOptionLabels, radioInputs, this.appendStatusMessage.bind(this));
+            if (noOption) selectedRadioElement = noOption.element;
+            this.appendStatusMessage(`Fallback: Sponsorship -> No (if available)`);
+          } else {
+             // As a very last resort, if still no selectedRadioElement, and options exist, consider the first one if absolutely necessary.
+             // However, it's better to skip if uncertain rather than pick a wrong default.
             this.appendStatusMessage(
-              `No rule for "${questionText}" - defaulting to first option: ${selectedValue}`
+              `No specific AI or fallback rule for "${questionText}". Field will be skipped unless required or a default is present.`
             );
           }
         }
 
-        // Now find and click the radio button with the selected value
-        if (selectedValue) {
-          let radioClicked = false;
-
-          for (const radio of radioInputs) {
-            if (radio.value === selectedValue) {
-              // Scroll to the radio
-              this.scrollToTargetAdjusted(radio, 100);
-              await this.wait(300);
-
-              // Try clicking the label (more reliable in Lever forms)
-              const label = radio.closest("label");
-              if (label) {
-                label.click();
-                this.appendStatusMessage(
-                  `Clicked label for option: ${selectedValue}`
-                );
-              } else {
-                radio.click();
-                this.appendStatusMessage(
-                  `Clicked radio button: ${selectedValue}`
-                );
-              }
-
-              // Wait for potential UI updates
-              await this.wait(500);
-
-              // Verify the radio was actually selected
-              if (!radio.checked) {
-                radio.checked = true;
-                radio.dispatchEvent(new Event("change", { bubbles: true }));
-                this.appendStatusMessage(`Set radio checked property directly`);
-              }
-
-              radioClicked = true;
-              break;
-            }
+        if (selectedRadioElement) {
+          this.scrollToTargetAdjusted(selectedRadioElement, 100);
+          await this.wait(300);
+          const label = selectedRadioElement.closest("label");
+          if (label) {
+            label.click();
+          } else {
+            selectedRadioElement.click();
           }
-
-          if (!radioClicked) {
-            this.appendStatusMessage(
-              `Warning: Could not find radio option "${selectedValue}" for question "${questionText}"`
-            );
+          await this.wait(500); // Allow UI to update
+          if (!selectedRadioElement.checked) { // Verify and force if needed
+            selectedRadioElement.checked = true;
+            selectedRadioElement.dispatchEvent(new Event("change", { bubbles: true }));
           }
+          this.appendStatusMessage(
+            `Selected radio option for "${questionText}": ${selectedRadioElement.value}`
+          );
         }
       }
     } catch (error) {
-      debugLog("Error handling Lever radio buttons:", error);
+      debugLog("Error handling Lever radio buttons (AI Priority):", error);
       this.appendStatusMessage(
         `Warning: Error processing radio buttons - ${error.message}`
       );
     }
   }
 
-  // Helper method to get radio value by label
+  // Helper method to get radio value by label (used by fallback, now less critical)
   getRadioValueByLabel(radioInputs, targetLabel) {
     for (const radio of radioInputs) {
       const label = radio.closest("label");
@@ -4291,305 +4227,130 @@ class LeverJobAutomation {
 
   async handleLeverSelectFields(form, profile) {
     try {
-      this.appendStatusMessage("Processing select fields");
+      this.appendStatusMessage("Processing select fields (AI Priority)");
 
-      // Find all select elements
       const selectElements = form.querySelectorAll("select");
       this.appendStatusMessage(
         `Found ${selectElements.length} select elements`
       );
 
       for (const select of selectElements) {
-        // Skip hidden selects
         if (select.offsetParent === null || select.style.display === "none")
           continue;
 
-        // Get the question text using multiple approaches
         let questionText = "";
-        let questionContainer = null;
-
-        // Approach 1: Standard Lever structure
-        questionContainer = select.closest(".application-question, label");
+        // Simplified label extraction for brevity in this refactor
+        const questionContainer = select.closest(".application-question, label");
         if (questionContainer) {
-          const labelEl = questionContainer.querySelector(".application-label");
+          const labelEl = questionContainer.querySelector(".application-label, label");
           if (labelEl) {
-            const textEl = labelEl.querySelector(".text");
-            if (textEl) {
-              questionText = textEl.textContent.replace(/✱$/, "").trim();
-            } else {
-              // If no .text element, use the label element text directly
-              questionText = labelEl.textContent.replace(/✱$/, "").trim();
-            }
+            questionText = (labelEl.querySelector(".text") || labelEl)
+              .textContent.replace(/✱$/, "").trim();
           }
         }
-
-        // If we still don't have question text, try going up to parent elements
-        if (!questionText) {
-          // Go up to parent divs until we find one with text content
-          let parent = select.parentElement;
-          let depth = 0;
-          while (parent && depth < 3) {
-            // Limit search depth
-            const labelEl = parent.querySelector(".application-label, label");
-            if (labelEl) {
-              questionText = labelEl.textContent.replace(/✱$/, "").trim();
-              break;
-            }
-            parent = parent.parentElement;
-            depth++;
-          }
-        }
-
-        // If still no question text, try using the name attribute
         if (!questionText && select.name) {
           questionText = select.name.replace(/.*\[([^\]]+)\]$/, "$1");
         }
+         if (!questionText) {
+            const placeholder = select.getAttribute("aria-label") || select.id || select.name || "Unnamed select";
+            questionText = `Select field: ${placeholder}`;
+        }
+
 
         this.appendStatusMessage(
-          `Processing select field: "${
-            questionText || select.name || "Unnamed field"
-          }"`
+          `Select Q: "${questionText || select.name || "Unnamed select"}"`
         );
 
-        // Extract options for the select
-        const selectOptions = Array.from(select.options)
-          .filter((opt) => opt.value && opt.value !== "") // Filter out empty options
-          .map((opt) => opt.text.trim());
+        const selectOptionElements = Array.from(select.options).filter(opt => opt.value && opt.value !== "");
+        const selectOptionLabels = selectOptionElements.map(opt => opt.text.trim());
 
-        // Log available options
-        const optionsText = selectOptions.join(", ");
-        this.appendStatusMessage(
-          `Options: ${optionsText.substring(0, 100)}${
-            optionsText.length > 100 ? "..." : ""
-          }`
-        );
 
-        // Determine a value to select based on the question
+        if (selectOptionLabels.length === 0) {
+            this.appendStatusMessage("No valid options found for this select field. Skipping.");
+            continue;
+        }
+        
+        this.appendStatusMessage(`Options: ${selectOptionLabels.join(", ").substring(0,100)}...`);
+        
         let selectedValue = null;
-        let selectedOption = null;
+        let aiAnswer = null;
 
-        // First try getting answer from AI
         try {
-          // Use getAnswer to determine the best option
-          const answer = await this.getAnswer(
+          aiAnswer = await this.getAnswer(
             questionText,
-            selectOptions,
+            selectOptionLabels,
             profile
           );
-          this.appendStatusMessage(`AI suggested answer: ${answer}`);
+          this.appendStatusMessage(
+            `AI response for "${questionText}": "${aiAnswer}"`
+          );
 
-          // Try to match the answer to an option
-          for (const option of select.options) {
-            if (option.value === "" || option.disabled) continue;
-
-            const optionText = option.text.trim();
-            if (
-              optionText.toLowerCase() === answer.toLowerCase() ||
-              optionText.includes(answer) ||
-              answer.includes(optionText)
-            ) {
-              selectedValue = option.value;
-              selectedOption = option;
-              this.appendStatusMessage(`AI matched option: ${optionText}`);
-              break;
-            }
-          }
-
-          // If no direct match but answer is a value, try that
-          if (!selectedValue) {
-            const valueOption = Array.from(select.options).find(
-              (opt) =>
-                opt.value && opt.value.toLowerCase() === answer.toLowerCase()
+          if (aiAnswer) {
+            const bestMatch = findBestMatchingOptionUtil(
+              aiAnswer,
+              selectOptionLabels,
+              selectOptionElements, // Pass the actual <option> elements
+              this.appendStatusMessage.bind(this)
             );
-
-            if (valueOption) {
-              selectedValue = valueOption.value;
-              selectedOption = valueOption;
+            if (bestMatch) {
+              selectedValue = bestMatch.value; // Use the value of the matched <option> element
               this.appendStatusMessage(
-                `AI matched by value: ${valueOption.text}`
+                `AI selected option: "${bestMatch.label}" (Value: ${selectedValue}, Score: ${bestMatch.score}) for "${questionText}"`
+              );
+            } else {
+                 this.appendStatusMessage(
+                `AI answer "${aiAnswer}" did not robustly match any select option for "${questionText}".`
               );
             }
           }
         } catch (error) {
           debugLog(
-            `Error getting AI answer for select field: ${error.message}`
+            `Error getting AI answer for select field "${questionText}": ${error.message}`
           );
-          // Continue to fallback logic
+           this.appendStatusMessage(
+            `AI error for "${questionText}", using fallback.`
+          );
         }
 
-        // If AI didn't provide a suitable answer, use fallback logic
         if (!selectedValue) {
-          this.appendStatusMessage("Using fallback logic for select field");
+          this.appendStatusMessage(
+            `Using fallback logic for select "${questionText}"`
+          );
           const questionLower = questionText.toLowerCase();
-
-          // Special handling for different types of questions
-
-          // Handle source/referral questions
+          // Simplified fallback logic
           if (
-            questionLower.includes("find") ||
             questionLower.includes("source") ||
-            questionLower.includes("hear about") ||
-            questionLower.includes("referred") ||
-            questionLower.includes("referral")
+            questionLower.includes("hear about")
           ) {
-            // For referral source, prefer LinkedIn
-            const linkedInOption = Array.from(select.options).find((opt) =>
-              opt.text.toLowerCase().includes("linkedin")
-            );
-
-            if (linkedInOption) {
-              selectedValue = linkedInOption.value;
-              selectedOption = linkedInOption;
-              this.appendStatusMessage(
-                `Setting referral source to: ${linkedInOption.text}`
-              );
-            } else if (select.options.length > 1) {
-              // Find a reasonable option after the first (which is usually just a placeholder)
-              const reasonableIndex = select.options.length > 2 ? 2 : 1;
-              if (
-                select.options[reasonableIndex] &&
-                select.options[reasonableIndex].value
-              ) {
-                selectedValue = select.options[reasonableIndex].value;
-                selectedOption = select.options[reasonableIndex];
-                this.appendStatusMessage(
-                  `Setting referral source to: ${select.options[reasonableIndex].text}`
-                );
-              }
-            }
-          }
-          // Handle education questions
-          else if (
-            questionLower.includes("university") ||
-            questionLower.includes("school") ||
-            questionLower.includes("college") ||
-            questionLower.includes("education")
-          ) {
-            // If profile has education information, try to match
-            if (profile.education) {
-              // Look for a close match to profile education
-              for (const option of select.options) {
-                if (option.value === "" || option.disabled) continue;
-                if (
-                  option.text
-                    .toLowerCase()
-                    .includes(profile.education.toLowerCase()) ||
-                  profile.education
-                    .toLowerCase()
-                    .includes(option.text.toLowerCase())
-                ) {
-                  selectedValue = option.value;
-                  selectedOption = option;
-                  this.appendStatusMessage(
-                    `Matched education to: ${option.text}`
-                  );
-                  break;
-                }
-              }
-            }
-
-            // If no match found, try to find "Other" option
-            if (!selectedValue) {
-              const otherOption = Array.from(select.options).find((opt) =>
-                opt.text.toLowerCase().includes("other")
-              );
-
-              if (otherOption) {
-                selectedValue = otherOption.value;
-                selectedOption = otherOption;
-                this.appendStatusMessage(
-                  `Using "Other" option for education: ${otherOption.text}`
-                );
-              }
-            }
-          }
-          // Handle diversity, gender, and demographic questions with "prefer not to say" option
-          else if (
+            const linkedInOption = findBestMatchingOptionUtil("LinkedIn", selectOptionLabels, selectOptionElements, this.appendStatusMessage.bind(this));
+            if (linkedInOption) selectedValue = linkedInOption.value;
+            this.appendStatusMessage(`Fallback: Referral source -> LinkedIn (if available)`);
+          } else if (
             questionLower.includes("gender") ||
-            questionLower.includes("sex") ||
             questionLower.includes("race") ||
             questionLower.includes("ethnicity") ||
             questionLower.includes("disability") ||
-            questionLower.includes("veteran") ||
-            select.id === "disabilitySelectElement"
+            questionLower.includes("veteran")
           ) {
-            // Find "prefer not to say" or equivalent option
-            const declineOptions = Array.from(select.options).filter(
-              (opt) =>
-                opt.value !== "" &&
-                !opt.disabled &&
-                (opt.text.toLowerCase().includes("prefer not") ||
-                  opt.text.toLowerCase().includes("decline") ||
-                  opt.text.toLowerCase().includes("not wish") ||
-                  opt.text.toLowerCase().includes("not want to") ||
-                  opt.text.toLowerCase().includes("don't"))
-            );
-
-            if (declineOptions.length > 0) {
-              selectedValue = declineOptions[0].value;
-              selectedOption = declineOptions[0];
-              this.appendStatusMessage(
-                `Setting demographic field to: ${declineOptions[0].text}`
-              );
-            }
-          }
-          // Handle salary/compensation questions
-          else if (
-            questionLower.includes("salary") ||
-            questionLower.includes("compensation") ||
-            questionLower.includes("pay")
-          ) {
-            // For salary expectations, pick a mid-range value if available
-            const options = Array.from(select.options).filter(
-              (opt) => opt.value && !opt.disabled
-            );
-            if (options.length > 2) {
-              // Skip first empty option, choose a slightly above middle option
-              const midIndex = Math.min(
-                Math.floor(options.length * 0.6),
-                options.length - 1
-              );
-              selectedValue = options[midIndex].value;
-              selectedOption = options[midIndex];
-              this.appendStatusMessage(
-                `Setting salary expectation to: ${options[midIndex].text}`
-              );
-            }
+            const declineOption = findBestMatchingOptionUtil("Prefer not to say", selectOptionLabels, selectOptionElements, this.appendStatusMessage.bind(this)) ||
+                                  findBestMatchingOptionUtil("Decline to self-identify", selectOptionLabels, selectOptionElements, this.appendStatusMessage.bind(this));
+            if (declineOption) selectedValue = declineOption.value;
+            this.appendStatusMessage(`Fallback: Demographic -> Prefer not to say (if available)`);
+          } else {
+            // For other cases, if no AI match, do not select a default unless absolutely necessary
+            // This avoids incorrect guesses.
+            this.appendStatusMessage(
+                `No specific AI or fallback rule for "${questionText}". Field will be skipped unless required or a default is present.`
+                );
           }
         }
 
-        this.appendStatusMessage(
-          `Selected value: ${
-            selectedOption
-              ? selectedOption.text
-              : selectedValue || "none determined"
-          }`
-        );
-
-        // If we've determined a value to use, select it
         if (selectedValue) {
           await this.selectOptionByValueEnhanced(select, selectedValue);
-        } else if (select.options.length > 1) {
-          // Default to selecting the first non-empty option
-          const firstNonEmptyOpt = Array.from(select.options).find(
-            (opt) => opt.value && opt.value !== "" && !opt.disabled
-          );
-
-          if (firstNonEmptyOpt) {
-            await this.selectOptionByValueEnhanced(
-              select,
-              firstNonEmptyOpt.value
-            );
-            this.appendStatusMessage(
-              `Selected default option for ${questionText || "field"}: ${
-                firstNonEmptyOpt.text
-              }`
-            );
-          }
         }
       }
     } catch (error) {
-      debugLog("Error handling Lever select fields:", error);
+      debugLog("Error handling Lever select fields (AI Priority):", error);
       this.appendStatusMessage(
         `Warning: Error processing select fields - ${error.message}`
       );

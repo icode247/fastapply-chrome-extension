@@ -195,7 +195,7 @@ class JobAutomation {
     this.HOST = HOST || "https://fastapply.co";
 
     // Detect platform
-    this.detectPlatform();
+    this.detectPlatform(); // Platform detection message is now in detectPlatform or init
 
     // Initialize on document ready
     if (document.readyState === "loading") {
@@ -203,6 +203,11 @@ class JobAutomation {
     } else {
       this.init();
     }
+    
+    // Initial status messages after overlay is created and platform detected
+    const platformName = this.state.platform ? this.state.platform.charAt(0).toUpperCase() + this.state.platform.slice(1) : "Unknown";
+    this.appendStatusMessage(`Platform detected: ${platformName}.`);
+    this.appendStatusMessage("Indeed/Glassdoor automation core initialized.");
 
     // Set up health check timer
     this.healthCheckTimer = setInterval(() => this.checkHealth(), 30000);
@@ -216,40 +221,28 @@ class JobAutomation {
    */
   detectPlatform() {
     const url = window.location.href;
+    let detectedPlatform = null;
 
-    // Check for Indeed
     if (
       CONFIG.URL_PATTERNS.INDEED.SEARCH_PAGE.test(url) ||
       CONFIG.URL_PATTERNS.INDEED.JOB_PAGE.test(url) ||
-      CONFIG.URL_PATTERNS.INDEED.APPLY_PAGE.test(url)
+      CONFIG.URL_PATTERNS.INDEED.APPLY_PAGE.test(url) ||
+      url.includes("smartapply.indeed.com")
     ) {
-      this.state.platform = CONFIG.PLATFORMS.INDEED;
-      debugLog("Detected platform: Indeed");
-      return;
-    }
-
-    // Check for Glassdoor
-    if (
+      detectedPlatform = CONFIG.PLATFORMS.INDEED;
+    } else if (
       CONFIG.URL_PATTERNS.GLASSDOOR.SEARCH_PAGE.test(url) ||
       CONFIG.URL_PATTERNS.GLASSDOOR.JOB_PAGE.test(url) ||
       CONFIG.URL_PATTERNS.GLASSDOOR.APPLY_PAGE.test(url)
     ) {
-      this.state.platform = CONFIG.PLATFORMS.GLASSDOOR;
-      debugLog("Detected platform: Glassdoor");
-      return;
+      detectedPlatform = CONFIG.PLATFORMS.GLASSDOOR;
+    } else {
+      detectedPlatform = CONFIG.PLATFORMS.INDEED; // Default
+      debugLog("Could not definitively determine platform, defaulting to Indeed.");
     }
-
-    // Special case for smartapply.indeed.com
-    if (url.includes("smartapply.indeed.com")) {
-      this.state.platform = CONFIG.PLATFORMS.INDEED;
-      debugLog("Detected platform: Indeed (SmartApply)");
-      return;
-    }
-
-    // If we can't determine the platform, default to Indeed
-    this.state.platform = CONFIG.PLATFORMS.INDEED;
-    console.log(CONFIG.PLATFORMS.INDEED);
-    debugLog("Could not determine platform, defaulting to Indeed");
+    
+    this.state.platform = detectedPlatform;
+    // Message moved to constructor after overlay is ready
   }
 
   /**
@@ -364,7 +357,7 @@ class JobAutomation {
     document.body.appendChild(container);
 
     // Set initial status
-    this.updateStatusIndicator("initializing");
+    this.updateStatusIndicator("initializing", "Setting up..."); // More descriptive
 
     // Add animation style
     const style = document.createElement("style");
@@ -405,7 +398,7 @@ class JobAutomation {
       setTimeout(async () => {
         await this.handleDetectedForm();
       }, 1000);
-
+      // No specific message here, checkForGlassdoorForm will log its attempts.
       return;
     }
 
@@ -474,11 +467,14 @@ class JobAutomation {
       // Regular processing for Indeed or other platforms
       allCards = document.querySelectorAll(this.getSelector("JOB_CARDS"));
     }
+    debugLog(`Found ${allCards.length} total potential job cards on page.`); 
 
-    return Array.from(allCards).filter((card) => {
+    const unprocessedCards = Array.from(allCards).filter((card) => {
       const cardId = this.getJobCardId(card);
       return !this.state.processedCards.has(cardId);
     });
+    this.appendStatusMessage(`Found ${unprocessedCards.length} unprocessed job cards to consider this pass.`);
+    return unprocessedCards;
   }
 
   /**
@@ -2205,30 +2201,35 @@ class JobAutomation {
       // First check if we've already applied to this job
       const alreadyApplied = await this.checkIfAlreadyApplied();
       if (alreadyApplied) {
-        // If already applied, we've handled everything in the checkIfAlreadyApplied method
+        // If already applied, messages are handled in checkIfAlreadyApplied
         return;
       }
 
-      this.appendStatusMessage("Form detected, starting application process");
+      this.appendStatusMessage(`Application form detected for: ${this.currentJobDetails?.title || 'current job'}. Preparing to fill.`);
+      this.updateStatusIndicator("applying", `Preparing ${this.currentJobDetails?.title || 'form'}`);
 
       // Wait for profile data if needed
       if (!this.profile) {
-        this.profile = await this.getProfileData();
+        this.profile = await this.getProfileData(); // getProfileData has its own logging
       }
 
       if (this.profile) {
+        this.appendStatusMessage(`Attempting to apply for: ${this.currentJobDetails?.title || 'current job'}`);
         // Handle application form
         const success = await this.handleApplyForm();
 
         // After form submission (success or failure), update status
         if (success) {
-          this.appendStatusMessage("Application submitted successfully");
+          this.appendStatusMessage(`Application submission successful for: ${this.currentJobDetails?.title || 'current job'}`);
+          this.updateStatusIndicator("applied", `${this.currentJobDetails?.title || 'Job'} applied`);
           if (this.currentJobDetails) {
             this.trackApplication(this.currentJobDetails);
           }
           this.markLastJobCardIfAvailable("applied");
         } else {
-          this.appendStatusMessage("Failed to complete application");
+          // Error message should be more specific from handleApplyForm or FormHandler ideally
+          this.appendStatusErrorMessage(`Application submission failed for: ${this.currentJobDetails?.title || 'current job'}.`);
+          this.updateStatusIndicator("error", "Application failed");
           this.markLastJobCardIfAvailable("error");
         }
 
@@ -2246,13 +2247,16 @@ class JobAutomation {
         }
       } else {
         this.appendStatusErrorMessage(
-          "No profile data available for form filling"
+          "No profile data available for form filling. Skipping application."
         );
+        this.updateStatusIndicator("error", "Profile data missing");
         // Reset application state
         this.state.isApplicationInProgress = false;
         this.state.applicationStartTime = null;
         this.state.pendingApplication = false;
         this.state.formDetected = false;
+        this.markLastJobCardIfAvailable("error");
+
 
         // Still move to next job if automation is running
         if (this.state.isRunning) {
@@ -2261,13 +2265,16 @@ class JobAutomation {
       }
     } catch (error) {
       errorLog("Error handling detected form:", error);
-      this.appendStatusErrorMessage("Error handling form: " + error.message);
+      const jobTitle = this.currentJobDetails?.title || 'the current job';
+      this.appendStatusErrorMessage(`Error processing application form for ${jobTitle}: ${error.message}`);
+      this.updateStatusIndicator("error", `Form error on ${jobTitle}`);
 
       // Reset application state
       this.state.isApplicationInProgress = false;
       this.state.applicationStartTime = null;
       this.state.pendingApplication = false;
       this.state.formDetected = false;
+      this.markLastJobCardIfAvailable("error");
 
       // Still try to move on if automation is running
       if (this.state.isRunning) {
@@ -2569,29 +2576,32 @@ class JobAutomation {
   async startAutomation() {
     try {
       if (this.state.isRunning) {
-        this.appendStatusMessage("Automation already running");
+        this.appendStatusMessage("Automation is already running.");
         return;
       }
 
-      this.appendStatusMessage("Starting automation");
+      this.appendStatusMessage("Automation process started.");
+      this.updateStatusIndicator("running", "Starting...");
+
 
       // Check if jobs were found before proceeding
       const { jobsFound, jobCount, searchQuery } = this.checkIfJobsFound();
 
       if (!jobsFound) {
         this.appendStatusMessage(
-          `No jobs found for search: ${searchQuery || "your search criteria"}`
+          `No jobs found for search: ${searchQuery || "your search criteria"}. Automation will not start.`
         );
         this.updateStatusIndicator("completed", "No jobs found");
-        return; // Don't start automation if no jobs found
+        this.state.isRunning = false; // Ensure isRunning is false if no jobs
+        return; 
       }
-
-      this.updateStatusIndicator("running");
+      
+      this.appendStatusMessage(`Starting automation for ${jobCount || 'multiple'} jobs found for "${searchQuery || 'current criteria'}".`);
 
       // Initialize state
       this.state.isRunning = true;
-      this.state.currentJobIndex = 0;
-      this.state.processedCount = 0;
+      this.state.currentJobIndex = 0; // Ensure we start from the first job
+      this.state.processedCount = 0; // Reset count for this run
       this.state.lastActivity = Date.now();
       this.state.formDetected = false;
       this.state.isApplicationInProgress = false;
@@ -2651,32 +2661,51 @@ class JobAutomation {
 
       if (jobCards.length === 0) {
         // Try to load more jobs
-        if (await this.goToNextPage()) {
-          // Wait for page to load and try again
-          setTimeout(() => this.processNextJob(), 3000);
+        if (await this.goToNextPage()) { 
+          // goToNextPage will add its own messages
+          this.updateStatusIndicator("searching", "Next page...");
+          setTimeout(() => this.processNextJob(), CONFIG.TIMEOUTS.EXTENDED); // Use longer timeout for page load
         } else {
-          this.appendStatusMessage("No more jobs to process");
-          this.updateStatusIndicator("completed");
+          // Message for no more jobs is now more explicitly handled by goToNextPage or checkIfJobsFound in the loop.
+          this.appendStatusMessage("All jobs processed for this search. Automation finished.");
+          this.updateStatusIndicator("completed", "All jobs processed");
           this.state.isRunning = false;
         }
         return;
       }
-
+      this.updateStatusIndicator("searching", `Job ${this.state.processedCount + 1} of approx. ${this.state.processedCount + jobCards.length}`);
       // Process the first unprocessed job card
       const jobCard = jobCards[0];
       this.state.lastClickedJobCard = jobCard;
 
       // Mark as processing
       this.markJobCard(jobCard, "processing");
+      
+      // Extract job details before clicking the card (in case click fails or navigates away)
+      const jobDetails = this.extractJobDetailsFromCard(jobCard);
+      this.currentJobDetails = jobDetails; // Store for later use
+
+      this.appendStatusMessage(`Processing job: ${jobDetails.title} at ${jobDetails.company}`);
+      // this.updateStatusIndicator("searching", `Viewing ${jobDetails.title}`); // Already updated above
 
       // Click the job card to show details
-      this.appendStatusMessage("Clicking job card to show details");
+      this.appendStatusMessage(`Attempting to view details for: ${jobDetails.title} at ${jobDetails.company}`);
       if (this.state.platform === CONFIG.PLATFORMS.GLASSDOOR) {
-        console.log("Clicking job card on glassdoor");
-
-        jobCard.querySelector("a.JobCard_trackingLink__HMyun")?.click();
+        debugLog("Clicking Glassdoor job card");
+        const glassdoorLink = jobCard.querySelector("a.JobCard_trackingLink__HMyun") || jobCard.querySelector('a[data-test="job-link"]');
+        if (glassdoorLink) {
+            glassdoorLink.click();
+        } else {
+            jobCard.click(); // Fallback to clicking the card itself
+        }
       } else {
-        jobCard.querySelector("a.jcs-JobTitle")?.click();
+        // Indeed's specific click target might be the title link or the card itself.
+        const titleLink = jobCard.querySelector("a.jcs-JobTitle") || jobCard.querySelector(".jobTitle a");
+        if (titleLink) {
+            titleLink.click();
+        } else {
+            jobCard.click();
+        }
       }
 
       // Wait for details to load
@@ -2685,17 +2714,12 @@ class JobAutomation {
       // Handle any popups
       this.handlePopups();
 
-      // Extract job details before clicking apply
-      const jobDetails = this.extractJobDetailsFromCard(jobCard);
-
-      // Store job details for later tracking
-      this.currentJobDetails = jobDetails;
-
       // Find the apply button in the details panel
       const applyButton = await this.findApplyButton();
 
       if (!applyButton) {
-        this.appendStatusMessage("No Easy Apply button found, skipping job");
+        this.appendStatusMessage(`No Easy Apply button for: "${jobDetails.title || 'this job'}". Skipping.`);
+        this.updateStatusIndicator("skipped", "No Easy Apply");
         this.markJobCard(jobCard, "skipped");
         this.state.processedCards.add(this.getJobCardId(jobCard));
         this.state.processedCount++;
@@ -2756,24 +2780,28 @@ class JobAutomation {
     try {
       const nextButton = document.querySelector(this.getSelector("NEXT_PAGE"));
       if (nextButton && this.isElementVisible(nextButton)) {
-        this.appendStatusMessage("Moving to next page of results");
+        this.appendStatusMessage("Navigating to next page of search results...");
         nextButton.click();
 
         // Wait for the page to load
-        await this.sleep(3000);
+        await this.sleep(CONFIG.TIMEOUTS.EXTENDED); // Use a longer wait for page navigation
 
         // Check if the new page has jobs
-        const { jobsFound } = this.checkIfJobsFound();
+        const { jobsFound } = this.checkIfJobsFound(); // This method already logs
         if (!jobsFound) {
-          this.appendStatusMessage("No jobs found on next page");
+          // Message handled by checkIfJobsFound or the calling processNextJob
           return false;
         }
-
+        this.state.currentJobIndex = 0; // Reset index for new page
+        // this.state.processedCards.clear(); // Clear processed cards for new page if IDs are page-specific
+        this.appendStatusMessage("Successfully navigated to the next page.");
         return true;
       }
+      this.appendStatusMessage("No next page button found. Reached the end of search results.");
       return false;
     } catch (error) {
       errorLog("Error going to next page:", error);
+      this.appendStatusErrorMessage("Failed to navigate to next page: " + error.message);
       return false;
     }
   }
@@ -2900,6 +2928,7 @@ class JobAutomation {
 
       // Normal initialization for other pages
       const platform = this.state.platform;
+      const platformNameInit = platform.charAt(0).toUpperCase() + platform.slice(1);
 
       const isSearchPage =
         CONFIG.URL_PATTERNS[platform.toUpperCase()].SEARCH_PAGE.test(url);
@@ -2908,44 +2937,38 @@ class JobAutomation {
       const isApplyPage =
         CONFIG.URL_PATTERNS[platform.toUpperCase()].APPLY_PAGE.test(url);
 
+      // Determine page type and log, but do not start automation automatically.
       if (isSearchPage) {
         this.appendStatusMessage(
-          `${
-            platform.charAt(0).toUpperCase() + platform.slice(1)
-          } search page detected`
+          `${platformNameInit} search page detected. Ready and waiting for command.`
         );
-
-        // Check if jobs are found before applying filters
-        const { jobsFound } = this.checkIfJobsFound();
-        if (!jobsFound) {
-          this.appendStatusMessage("No jobs found in search results");
-          this.updateStatusIndicator("completed", "No jobs found");
-          this.state.ready = true;
-          this.state.initialized = true;
-          return;
-        }
-
-        // Apply filters after a short delay
-        setTimeout(() => this.applySearchFilters(), 1000);
+        // Potential future pre-processing for search pages can go here,
+        // e.g., identifying job cards but not clicking them.
       } else if (isJobPage || isApplyPage) {
         this.appendStatusMessage(
-          `${
-            platform.charAt(0).toUpperCase() + platform.slice(1)
-          } job page detected`
+          `${platformNameInit} job/apply page detected. Ready and waiting for command.`
         );
-
-        // Handle individual job page
-        this.handleJobPage();
+        // Potential future pre-processing for job/apply pages can go here.
+      } else {
+        this.appendStatusMessage(
+          `Current page type undetermined for ${platformNameInit}. Waiting for command.`
+        );
       }
-
+      
+      this.appendStatusMessage("Automation systems initialized and idle.");
+      this.updateStatusIndicator("ready", "Idle"); // Indicate it's ready but idle
       this.state.initialized = true;
+      this.state.ready = true; // Set to ready so it can accept start command
 
-      // Automatically start automation after initialization
-      setTimeout(() => {
-        if (isSearchPage && this.state.ready && !this.state.isRunning) {
-          this.startAutomation();
-        }
-      }, 3000);
+      // The following auto-start logic is removed:
+      // setTimeout(() => {
+      //    // Check jobsFound again here if isSearchPage, because applySearchFilters might change it.
+      //   const { jobsFound: currentlyJobsFound } = this.checkIfJobsFound();
+      //   if (isSearchPage && this.state.ready && !this.state.isRunning && currentlyJobsFound) {
+      //      this.startAutomation();
+      //   }
+      // }, 3000);
+
     } catch (error) {
       errorLog("Error in init:", error);
       this.appendStatusErrorMessage("Initialization error: " + error.message);
@@ -2960,20 +2983,59 @@ const jobAutomation = new JobAutomation();
 // Add message listener
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   try {
-    const { action, type } = message;
+    const { action, type, data } = message; 
     const messageType = action || type;
 
     switch (messageType) {
-      case "startJobSearch":
-      case "startAutomation":
-        jobAutomation.startAutomation();
-        sendResponse({ status: "processing" });
+      case "startJobSearch": // This case might be deprecated if "startAutomation" is preferred
+      case "startAutomation": // This should be the primary command from background.js
+        jobAutomation.appendStatusMessage(`Received ${messageType} command from background script.`);
+        if(data && data.userData) {
+            jobAutomation.userData = data.userData; // Ensure userData is passed for profile info
+            jobAutomation.profile = data.userData; // Assuming userData contains the profile
+             jobAutomation.appendStatusMessage("User data updated from popup/background.");
+        } else if (!jobAutomation.userData && !jobAutomation.profile) {
+            // Attempt to fetch profile data if not provided, though background should ideally provide it.
+            jobAutomation.appendStatusMessage("User data not provided with start command, attempting to fetch...");
+            jobAutomation.getProfileData().then(profile => {
+                if (profile) {
+                    jobAutomation.userData = profile; // Assuming getProfileData returns the structure needed
+                    jobAutomation.profile = profile;
+                    jobAutomation.appendStatusMessage("Profile data fetched successfully.");
+                    jobAutomation.startAutomation(); // Start after fetching
+                } else {
+                    jobAutomation.appendStatusErrorMessage("Failed to fetch profile data. Cannot start automation.");
+                    sendResponse({ status: "error", message: "Profile data missing." });
+                    return; // Important to return if profile can't be fetched
+                }
+            }).catch(err => {
+                jobAutomation.appendStatusErrorMessage(`Error fetching profile data: ${err.message}. Cannot start automation.`);
+                sendResponse({ status: "error", message: `Profile data fetch error: ${err.message}` });
+                return;
+            });
+            // Since getProfileData is async, we send response after it resolves or handle it within.
+            // For now, we let startAutomation be called inside .then()
+            return true; // Indicate async response
+        }
+        // If userData/profile already exists or was just set synchronously
+        if (jobAutomation.profile || jobAutomation.userData) {
+             jobAutomation.startAutomation();
+             sendResponse({ status: "Automation starting..." });
+        } else {
+            // This case should ideally not be hit if logic above is correct
+            jobAutomation.appendStatusErrorMessage("Profile/User data is missing. Cannot start automation.");
+            sendResponse({ status: "error", message: "Profile data missing." });
+        }
         break;
 
       case "stopAutomation":
-        jobAutomation.state.isRunning = false;
-        jobAutomation.appendStatusMessage("Automation stopped by user");
-        jobAutomation.updateStatusIndicator("stopped");
+        if (jobAutomation.state.isRunning) {
+            jobAutomation.state.isRunning = false;
+            jobAutomation.appendStatusMessage("Automation stopped by user command.");
+            jobAutomation.updateStatusIndicator("stopped", "User action");
+        } else {
+            jobAutomation.appendStatusMessage("Automation is not currently running.");
+        }
         sendResponse({ status: "stopped" });
         break;
 
