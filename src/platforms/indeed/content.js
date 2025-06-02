@@ -2,7 +2,7 @@ import { StateManager } from "@shared/stateManager";
 import { canApplyMore } from "@shared/checkAuthorization";
 import { getJobURL, generateBusinessDates } from "@shared/utils";
 import { HOST } from "@shared/constants";
-
+//handle
 class IndeedJobParser {
   constructor() {
     this.targetClass = "ia-JobDescription";
@@ -155,7 +155,7 @@ class FastApplyAutomation {
     console.log("FastApplyAutomation constructor");
   }
 
-  async handleMessage(message, sender, sendResponse) {
+  async handleIndeedMessage(message, sender, sendResponse) {
     console.log("Content script received message:", message);
 
     try {
@@ -1485,7 +1485,7 @@ const automationHandler = new FastApplyAutomation();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log("HWass s")
-  automationHandler.handleMessage(message, sender, sendResponse);
+  automationHandler.handleIndeedMessage(message, sender, sendResponse);
   return true;
 });
 

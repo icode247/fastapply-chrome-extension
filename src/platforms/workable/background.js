@@ -1,1300 +1,1607 @@
-// Background script for Workable job application automation
-import { STATE } from "@shared/constants";
-
-// Configuration constants
-const SERVER_PATH = "/api/v1/extension/send-cv/session";
-const STORAGE_KEY = "WORKABLE_STORE";
-const GET_VACANCY_FIELDS_VALUES_TIMEOUT = 300000;
-
-// Default request headers
-const DEFAULT_FETCH_HEADERS = {
-  Accept: "application/json",
-  "Content-Type": "application/json",
-};
-
-// Default state for search task
-const SEARCH_TASK_DEFAULT = {
-  tabId: null,
-  limit: null,
-  domain: null,
-  current: null,
-  searchLinkPattern: null,
-};
-
-// Default state for send CV task
-const SEND_CV_TASK_DEFAULT = {
-  url: null,
-  tabId: null,
-  active: false,
-  finalUrl: null,
-};
-
-// Global store for application state
-const STORE = {
-  currentState: STATE.IDLE,
-  tasks: {
-    search: {
-      ...SEARCH_TASK_DEFAULT,
-    },
-    sendCv: {
-      ...SEND_CV_TASK_DEFAULT,
-    },
-  },
-  userId: null,
-  targetTabId: null,
-  windowId: null,
-  profile: null,
-  session: null,
-  started: false,
-  serverBaseUrl: "",
-  submittedLinks: [],
-  applyTabOpened: null,
-  searchTabTimestamp: null,
-  applyTabTimestamp: null,
-  windowTimestamp: null,
-  failedSubmissions: 0,
-  successfulSubmissions: 0,
-  finished: false,
-  lastError: null,
-  debugLogs: [],
-};
-
-// Utility function to log debug information
-function logDebug(message, data = {}) {
-  const logEntry = {
-    timestamp: new Date().toISOString(),
-    message,
-    data,
-  };
-
-  console.log(`[DEBUG] ${message}`, data);
-  STORE.debugLogs.push(logEntry);
-
-  // Keep only last 100 logs
-  if (STORE.debugLogs.length > 100) {
-    STORE.debugLogs.shift();
-  }
-
-  saveStoreToStorage();
-}
-
-// Load store from storage
-async function loadStoreFromStorage() {
-  try {
-    const result = await chrome.storage.local.get([STORAGE_KEY]);
-    if (result[STORAGE_KEY]) {
-      Object.assign(STORE, result[STORAGE_KEY]);
-      logDebug("Store loaded from storage", { store: { ...STORE } });
-    } else {
-      logDebug("No store found in storage");
-    }
-    return STORE;
-  } catch (error) {
-    logDebug("Error loading store from storage", {
-      error: errorToString(error),
-    });
-    sendErrorToServer(
-      "Error loading store from storage:",
-      errorToString(error)
-    );
-    return STORE;
-  }
-}
-
-// Save store to storage
-async function saveStoreToStorage() {
-  try {
-    await chrome.storage.local.set({ [STORAGE_KEY]: STORE });
-    return true;
-  } catch (error) {
-    console.error("Error saving store to storage:", error);
-    sendErrorToServer("Error saving store to storage:", errorToString(error));
-    return false;
-  }
-}
-
-// Convert errors to string for logging
-function errorToString(e) {
-  if (e instanceof Error) {
-    if (e.stack) {
-      return e.stack;
-    }
-    let obj = {};
-    Error.captureStackTrace(obj, errorToString);
-    return obj.stack;
-  }
-  return e?.toString() ?? "Unknown error: " + e;
-}
-
-// Send error to server
-function sendErrorToServer(url, details) {
-  if (!STORE || !STORE.serverBaseUrl) {
-    console.error("Unable to send error to server: server base URL not found");
-    return Promise.reject(new Error("Server base URL not found"));
-  }
-
-  return fetchWithRetry(`${buildServerUrl()}/log/error`, {
-    body: JSON.stringify({
-      url,
-      details,
-    }),
-    method: "POST",
-    headers: buildFetchHeaders(),
-  })
-    .then(handleJsonFetchResponse)
-    .then(() => {
-      logDebug("Error sent to server");
-      return true;
-    })
-    .catch((error) => {
-      console.error("Failed to send error to server:", error);
-      return false;
-    });
-}
-
-// Build server URL
-function buildServerUrl() {
-  if (!STORE || !STORE.serverBaseUrl) {
-    throw new Error("Server base URL not found");
-  }
-
-  return (
-    (STORE?.serverBaseUrl.endsWith("/")
-      ? STORE?.serverBaseUrl.substring(0, STORE?.serverBaseUrl.lastIndexOf("/"))
-      : STORE?.serverBaseUrl) + SERVER_PATH
-  );
-}
-
-// Build fetch headers with authentication if available
-function buildFetchHeaders() {
-  const headers = {
-    ...DEFAULT_FETCH_HEADERS,
-  };
-
-  if (STORE.session?.apiKey) {
-    headers["Authorization"] = "Bearer " + STORE.session?.apiKey;
-  }
-
-  return headers;
-}
-
-// Fetch with timeout
-async function fetchWithTimeout(url, options = {}, timeout = 15000) {
-  const controller = new AbortController();
-  const { signal } = controller;
-
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    return await fetch(url, { ...options, signal });
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// Fetch with retry logic
-async function fetchWithRetry(
-  url,
-  options = {},
-  totalTimeout = 300000,
-  requestTimeout = 15000,
-  delay = 5000
-) {
-  const startTime = Date.now();
-
-  while (Date.now() - startTime < totalTimeout) {
-    try {
-      const response = await fetchWithTimeout(url, options, requestTimeout);
-
-      if (response.ok || response.status < 500) {
-        return response;
-      }
-
-      console.log(`Server error: ${response.status}`, url);
-      throw new Error(`Server error: ${response.status}`);
-    } catch (error) {
-      if (error.name === "AbortError") {
-        console.error("Request timed out", url);
-      } else {
-        console.error("Fetch error:", error.message, url);
-      }
-
-      if (Date.now() - startTime + delay >= totalTimeout) {
-        throw new Error(`Total timeout of ${totalTimeout} ms exceeded`);
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-  }
-
-  throw new Error(`Total timeout of ${totalTimeout} ms exceeded`);
-}
-
-// Handle text response
-function handleTextFetchResponse(resp) {
-  if (!resp.ok) {
-    throw new Error(`${resp.status} ${resp.statusText}`);
-  }
-  return resp.text();
-}
-
-// Handle JSON response
-async function handleJsonFetchResponse(resp) {
-  if (!resp.ok) {
-    throw new Error(`${resp.url}: ${resp.status} ${await resp.text()}`);
-  }
-  if (resp.headers.get("content-type")?.includes("application/json")) {
-    return resp.json();
-  }
-  return resp.text();
-}
-
-// Clean up resources and reset state
-async function cleanup() {
-  logDebug("Starting cleanup process");
-
-  if (STORE.windowId) {
-    try {
-      await chrome.windows.remove(STORE.windowId);
-      logDebug("Window removed", { windowId: STORE.windowId });
-    } catch (error) {
-      console.error("Error removing window:", error);
-      logDebug("Error removing window", { error: errorToString(error) });
-    }
-    STORE.windowId = null;
-  }
-
-  STORE.targetTabId = null;
-  STORE.currentState = STATE.IDLE;
-
-  // Reset tasks
-  STORE.tasks.sendCv = { ...SEND_CV_TASK_DEFAULT };
-  STORE.tasks.search = { ...SEARCH_TASK_DEFAULT };
-
-  STORE.started = false;
-  STORE.finished = false;
-
-  await saveStoreToStorage();
-
-  await chrome.alarms.clear("workableHeartbeat");
-  chrome.power.releaseKeepAwake();
-
-  logDebug("Cleanup completed");
-}
-
-// Close send CV tab and search for next job
-function closeSendCvTabAndSearchNext(sendResponse, status, message) {
-  logDebug("Closing send CV tab and searching next", { status, message });
-
-  STORE.applyTabOpened = null;
-  STORE.searchTabTimestamp = Date.now();
-  saveStoreToStorage();
-
-  return chrome.tabs
-    .remove(STORE.tasks.sendCv.tabId)
-    .then(() => {
-      logDebug("Send CV tab removed", { tabId: STORE.tasks.sendCv.tabId });
-
-      return chrome.tabs.sendMessage(STORE.tasks.search.tabId, {
-        action: "searchNext",
-        data: {
-          url: STORE.tasks.sendCv.url,
-          status: status ?? "SUCCESS",
-          message,
-        },
-      });
-    })
-    .then(() => {
-      STORE.tasks.sendCv = { ...SEND_CV_TASK_DEFAULT };
-      saveStoreToStorage();
-
-      if (sendResponse) {
-        sendResponse({ status: "success", message: "Searching for next job" });
-      }
-    })
-    .catch((error) => {
-      logDebug("Error in closeSendCvTabAndSearchNext", {
-        error: errorToString(error),
-      });
-      logConsoleAndSendToServerAndSendResponseIfNeed(error, sendResponse);
-    });
-}
-
-// Handle CV not submitted
-function cvNotSubmitted(sendResponse, url, type, details) {
-  logDebug("CV not submitted", { url, type, details });
-
-  if (type != "SKIP") {
-    STORE.failedSubmissions++;
-    saveStoreToStorage();
-  }
-
-  return fetchWithRetry(`${buildServerUrl()}/cv-not-submitted`, {
-    body: JSON.stringify({ url, type, details }),
-    method: "PUT",
-    headers: buildFetchHeaders(),
-  })
-    .then(handleJsonFetchResponse)
-    .then((data) => {
-      const { liftsLimit, liftsCurrent } = data;
-      logDebug("CV not submitted response", { liftsLimit, liftsCurrent });
-
-      if (liftsCurrent >= liftsLimit) {
-        return finishSuccess("lifts-out").then(() => {
-          if (sendResponse) {
-            sendResponse({
-              status: "success",
-              message: "Application limit reached",
-            });
-          }
-        });
-      } else {
-        return closeSendCvTabAndSearchNext(
-          sendResponse,
-          "ERROR",
-          `${type}: ${details}`
-        );
-      }
-    })
-    .catch((error) => {
-      logDebug("Error in cvNotSubmitted", { error: errorToString(error) });
-      console.error(error);
-
-      if (sendResponse) {
-        sendResponse({
-          status: "error",
-          message: error.message,
-        });
-      }
-    });
-}
-
-// Finish automation successfully
-async function finishSuccess(reason, status) {
-  logDebug("Finishing automation successfully", { reason, status });
-
-  try {
-    if (status != "already-stopped") {
-      const endpoint =
-        status != "stop"
-          ? `${buildServerUrl()}/finish`
-          : `${buildServerUrl()}/stop`;
-      await fetchWithRetry(endpoint, {
-        method: "PUT",
-        headers: buildFetchHeaders(),
-      }).then(handleTextFetchResponse);
-
-      logDebug("Server notified of finish", { endpoint });
-    }
-
-    // Notify web app
-    const tabs = await chrome.tabs.query({
-      url: ["https://app.liftmycv.com/*", "http://localhost:*/*"],
-    });
-
-    if (tabs && tabs.length > 0) {
-      const event_str = "send-cv-finished-success";
-
-      for (const tab of tabs) {
-        await chrome.scripting.executeScript({
-          args: [event_str, STORE.session],
-          func: (event_str, arg) => {
-            window.dispatchEvent(
-              new CustomEvent(event_str, {
-                detail: arg,
-              })
-            );
-          },
-          target: { tabId: tab.id },
-        });
-
-        logDebug("Notified web app tab of success", { tabId: tab.id });
-      }
-    }
-
-    STORE.finished = true;
-    saveStoreToStorage();
-
-    if (reason !== "window-closed" && STORE.windowId) {
-      await chrome.windows.remove(STORE.windowId);
-      logDebug("Removed window after successful finish", {
-        windowId: STORE.windowId,
-      });
-    }
-
-    return true;
-  } catch (error) {
-    logDebug("Error in finishSuccess", { error: errorToString(error) });
-    console.error("Error in finish success:", error);
-    sendErrorToServer("Error in finish success", errorToString(error));
-    return false;
-  }
-}
-
-// Finish automation with error
-async function finishError(reason) {
-  logDebug("Finishing automation with error", { reason });
-
-  try {
-    await fetchWithRetry(`${buildServerUrl()}/finish`, {
-      method: "PUT",
-      headers: buildFetchHeaders(),
-    })
-      .then(handleTextFetchResponse)
-      .then(async (data) => {
-        let event_str;
-        if (reason === "NotAuthorized") {
-          event_str = "not-authorized-error";
-        } else {
-          event_str = "send-cv-finished-error";
-        }
-
-        const tabs = await chrome.tabs.query({
-          url: ["https://app.liftmycv.com/*", "http://localhost:*/*"],
-        });
-
-        if (tabs && tabs.length > 0) {
-          for (const tab of tabs) {
-            await chrome.scripting.executeScript({
-              args: [event_str],
-              func: (event_str) => window.dispatchEvent(new Event(event_str)),
-              target: { tabId: tab.id },
-            });
-
-            logDebug("Notified web app tab of error", {
-              tabId: tab.id,
-              event: event_str,
-            });
-          }
-        }
-
-        STORE.finished = true;
-        saveStoreToStorage();
-
-        if (STORE.windowId) {
-          await chrome.windows.remove(STORE.windowId);
-          logDebug("Removed window after error finish", {
-            windowId: STORE.windowId,
-          });
-        }
-
-        return true;
-      });
-  } catch (error) {
-    logDebug("Error in finishError", { error: errorToString(error) });
-    console.error("Error in finish error:", error);
-    sendErrorToServer("Error in finish error", errorToString(error));
-    return false;
-  }
-}
-
-// Log errors to console, send to server, and send response if needed
-function logConsoleAndSendToServerAndSendResponseIfNeed(error, sendResponse) {
-  const errorAsString = errorToString(error);
-  console.error(errorAsString);
-
-  STORE.lastError = {
-    timestamp: new Date().toISOString(),
-    message: errorAsString,
-  };
-
-  saveStoreToStorage();
-  sendErrorToServer("WorkableJobApplyManager error", errorAsString);
-
-  if (typeof sendResponse === "function") {
-    sendResponse({
-      status: "error",
-      message: errorAsString,
-    });
-  }
-}
-
-// Build Google search URL for Workable jobs
-function getSearchUrl(request) {
-  // Build search URL for Workable
-  let query = `site:workable.com ${request.jobsToApply || ""}`;
-
-  if (request.location) {
-    query += ` ${request.location}`;
-  }
-
-  if (request.workplace === "REMOTE") {
-    query += " Remote";
-  }
-
-  return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-}
-
-// Main class for managing Workable job applications
+import { HOST } from "@shared/constants";
+import {
+  formatUserDataForJobApplication,
+  formatApplicationsToSubmittedLinks,
+} from "@shared/userDataFormatter";
+
+console.log("Background Script Initialized");
+
+/**
+ * WorkableJobApplyManager - Background script for managing Workable job applications
+ * Simplified robust implementation with clear state management
+ */
 const WorkableJobApplyManager = {
+  // State management
+  state: {
+    // Session data
+    userId: null,
+    profile: null,
+    session: null,
+    devMode: false,
+    serverBaseUrl: HOST,
+    avatarUrl: "",
+
+    // Window and tab tracking
+    windowId: null,
+    searchTabId: null,
+    applyTabId: null,
+
+    // Application state
+    started: false,
+    applicationInProgress: false,
+    applicationUrl: null,
+    applicationStartTime: null,
+
+    // Job search parameters
+    jobsLimit: 100,
+    jobsApplied: 0,
+    searchDomain: ["workable.com"],
+    submittedLinks: [],
+
+    // Last activity timestamp for health check
+    lastActivity: Date.now(),
+  },
+
+  /**
+   * Initialize the manager
+   */
   async init() {
-    logDebug("Initializing Workable Job Application Manager");
+    console.log("Workable Job Manager initialized");
 
-    await loadStoreFromStorage();
+    // Set up message listeners
+    chrome.runtime.onConnect.addListener(this.handleWorkableConnect.bind(this));
+    chrome.runtime.onMessage.addListener(this.handleWorkableMessage.bind(this));
 
-    // Reset state if needed
-    if (STORE.started && !STORE.finished) {
-      await cleanup();
-    }
+    // Set up tab removal listener
+    chrome.tabs.onRemoved.addListener(this.handleTabRemoved.bind(this));
 
-    // Setup message listener - THIS WAS MISSING IN THE ORIGINAL CODE
-    chrome.runtime.onMessage.addListener(this.handleMessage.bind(this));
-    logDebug("Runtime message listener set up");
+    // Set up tab removal listener
+    chrome.tabs.onRemoved.addListener(this.handleTabRemoved.bind(this));
 
-    // Setup window removal listener
+    // Add window removal listener - this is the new line
     chrome.windows.onRemoved.addListener(this.handleWindowRemoved.bind(this));
-    logDebug("Window removal listener set up");
 
-    // Setup alarm listener - THIS WAS COMMENTED OUT IN THE ORIGINAL CODE
-    chrome.alarms.onAlarm.addListener((alarm) => {
-      if (alarm.name === "workableHeartbeat") {
-        this.handleAlarm();
-      }
-    });
-    logDebug("Alarm listener set up");
-
-    return this;
+    // Start health check interval
+    this.startHealthCheck();
   },
 
-  // Handle window removal event
-  async handleWindowRemoved(windowId) {
-    await loadStoreFromStorage();
-
-    if (!STORE.started || windowId !== STORE.windowId) {
-      return;
-    }
-
-    logDebug("Window removed", { windowId, windowIdInStore: STORE.windowId });
-
-    try {
-      if (!STORE.finished) {
-        await finishSuccess("window-closed", "stop");
-      }
-    } catch (e) {
-      logDebug("Error in windows onRemoved handler", {
-        error: errorToString(e),
-      });
-      console.error("Error in windows onRemoved handler", e);
-      sendErrorToServer("Error in windows onRemoved handler", errorToString(e));
-    }
-
-    await cleanup();
+  create() {
+    return new WorkableJobApplyManager();
   },
 
-  // Handle heartbeat alarm
-  async handleAlarm() {
-    logDebug("Workable heartbeat triggered");
-    await loadStoreFromStorage();
+  /**
+   * Start health check interval to detect and recover from stuck states
+   */
+  startHealthCheck() {
+    setInterval(() => this.checkHealth(), 60000); // Check every minute
+  },
 
-    if (!STORE.started) {
-      logDebug("Automation not started, skipping heartbeat check");
-      return;
+  /**
+   * Check the health of the automation system and recover from stuck states
+   */
+  checkHealth() {
+    const now = Date.now();
+
+    // Check for stuck application
+    if (this.state.applicationInProgress && this.state.applicationStartTime) {
+      const applicationTime = now - this.state.applicationStartTime;
+
+      // If application has been active for over 5 minutes, it's probably stuck
+      if (applicationTime > 5 * 60 * 1000) {
+        console.warn(
+          "Application appears to be stuck for over 5 minutes, attempting recovery"
+        );
+
+        try {
+          // Force close the application tab if it exists
+          if (this.state.applyTabId) {
+            chrome.tabs.remove(this.state.applyTabId);
+          }
+
+          // Mark URL as error
+          const url = this.state.applicationUrl;
+          if (url) {
+            this.state.submittedLinks.push({
+              url,
+              status: "ERROR",
+              error: "Application timed out after 5 minutes",
+              timestamp: now,
+            });
+          }
+
+          // Reset application state
+          this.resetApplicationState();
+
+          // Notify search tab to continue
+          this.notifySearchNext({
+            url,
+            status: "ERROR",
+            message: "Application timed out after 5 minutes",
+          });
+        } catch (error) {
+          console.error("Error during application recovery:", error);
+        }
+      }
     }
 
+    // If no activity for 10 minutes but we're supposed to be running, check search tab
+    const inactivityTime = now - this.state.lastActivity;
+    if (inactivityTime > 10 * 60 * 1000 && this.state.started) {
+      this.checkSearchTab();
+    }
+
+    // Update last activity time
+    this.state.lastActivity = now;
+  },
+
+  /**
+   * Check if search tab is still active and reload if needed
+   */
+  async checkSearchTab() {
     try {
-      // Check if window still exists
-      try {
-        const window = await chrome.windows.get(STORE.windowId);
-        if (!window) {
-          logDebug("Window not found, cleaning up", {
-            windowId: STORE.windowId,
-          });
-          await cleanup();
-          return;
-        }
-      } catch (error) {
-        logDebug("Error checking window", { error: errorToString(error) });
-        if (error.message.includes("No window with id")) {
-          await cleanup();
-          return;
-        }
-      }
-
-      // Check tab status
-      const tabs = await chrome.tabs.query({
-        windowId: STORE.windowId,
-      });
-
-      let isSearchTab = false;
-      let isApplyTab = false;
-      let hangedApplyTab = false;
-      let hangedSearchTab = false;
-
-      for (const tab of tabs) {
-        if (STORE.tasks.search.tabId && tab.id === STORE.tasks.search.tabId) {
-          isSearchTab = true;
-        }
-
-        if (STORE.tasks.sendCv.tabId && tab.id === STORE.tasks.sendCv.tabId) {
-          isApplyTab = true;
-        }
-      }
-
-      logDebug("Tab status", {
-        isSearchTab,
-        isApplyTab,
-        searchTabId: STORE.tasks.search.tabId,
-        applyTabId: STORE.tasks.sendCv.tabId,
-        applyTabTimestamp: STORE.applyTabTimestamp,
-        searchTabTimestamp: STORE.searchTabTimestamp,
-        applyTabOpened: STORE.applyTabOpened,
-        currentTime: Date.now(),
-      });
-
-      if (isApplyTab) {
-        if (Date.now() - STORE.applyTabTimestamp > 30_000) {
-          logDebug("Apply tab hanged: no keepalive within 30 seconds");
-          hangedApplyTab = true;
-        }
-        if (Date.now() - STORE.applyTabOpened > 60_000 * 8) {
-          logDebug("Apply tab hanged: opened more than 8 minutes");
-          hangedApplyTab = true;
+      if (this.state.searchTabId) {
+        try {
+          const tab = await chrome.tabs.get(this.state.searchTabId);
+          if (tab) {
+            // Tab exists, try to refresh it
+            await chrome.tabs.reload(this.state.searchTabId);
+            console.log("Refreshed search tab after inactivity");
+          }
+        } catch (error) {
+          // Tab doesn't exist, recreate it
+          this.recreateSearchTab();
         }
       } else {
-        if (isSearchTab) {
-          if (
-            Date.now() - STORE.searchTabTimestamp > 30_000 &&
-            (!STORE.applyTabOpened ||
-              Date.now() - STORE.applyTabOpened > 30_000)
-          ) {
-            logDebug("Search tab hanged: no requests within 30 seconds");
-            hangedSearchTab = true;
-          }
-        }
-      }
-
-      // Handle stalled tabs
-      if (hangedSearchTab || !isSearchTab) {
-        if (Date.now() - STORE.windowTimestamp > 60_000) {
-          logDebug("Restarting search task due to hung search tab");
-          await this.startJobApplicationProcess({
-            userId: STORE.userId,
-            jobsToApply: STORE.session?.role,
-            location: STORE.session?.country,
-            country: STORE.session?.country,
-            workplace: STORE.session?.workplace,
-            serverBaseUrl: STORE.serverBaseUrl,
-            session: STORE.session,
-          });
-        } else {
-          logDebug("Window is fresh, no restarting needed");
-        }
-      } else {
-        if (hangedApplyTab) {
-          // Close any hung tabs except the search tab
-          for (const tab of tabs) {
-            if (tab.id === STORE.tasks.search.tabId) {
-              continue;
-            }
-
-            try {
-              await chrome.tabs.remove(tab.id);
-              logDebug("Closed hanged tab", { tabId: tab.id });
-            } catch (error) {
-              logDebug("Error closing hanged tab", {
-                tabId: tab.id,
-                error: errorToString(error),
-              });
-            }
-          }
-        }
-
-        if (hangedApplyTab || (STORE.applyTabOpened && !isApplyTab)) {
-          logDebug("Searching next due to hanged or missing apply tab");
-          const oldSendCvTask = STORE.tasks.sendCv;
-          STORE.tasks.sendCv = { ...SEND_CV_TASK_DEFAULT };
-
-          try {
-            await chrome.tabs.sendMessage(STORE.tasks.search.tabId, {
-              action: "searchNext",
-              data: {
-                url: oldSendCvTask.url,
-                status: "ERROR",
-                message: "Hanged tab closed",
-              },
-            });
-            logDebug("Sent searchNext message to search tab");
-          } catch (error) {
-            logDebug("Error sending searchNext message", {
-              tabId: STORE.tasks.search.tabId,
-              error: errorToString(error),
-            });
-          }
-        }
+        // No search tab ID, create a new one
+        this.recreateSearchTab();
       }
     } catch (error) {
-      logDebug("Error in alarm handler", { error: errorToString(error) });
-      console.error("Error in alarm", error);
-      sendErrorToServer("Error in alarm", errorToString(error));
+      console.error("Error checking search tab:", error);
     }
   },
 
-  // Handle messages from content scripts
-  async handleMessage(request, sender, sendResponse) {
-    logDebug("Received message", {
-      action: request.action,
-      sender: sender.tab
-        ? { tabId: sender.tab.id, url: sender.tab.url }
-        : "extension",
-    });
+  /**
+   * Recreate search tab if it's missing
+   */
+  async recreateSearchTab() {
+    if (!this.state.started || !this.state.session) return;
 
     try {
-      await loadStoreFromStorage();
+      // Build search query
+      let searchQuery = `site:workable.com ${
+        this.state.session.role || "jobs"
+      }`;
+      if (this.state.session.country) {
+        searchQuery += ` ${this.state.session.country}`;
+      }
+      if (this.state.session.city) {
+        searchQuery += ` ${this.state.session.city}`;
+      }
+      if (this.state.session.workplace === "REMOTE") {
+        searchQuery += " Remote";
+      } else if (this.state.session.workplace === "ON_SITE") {
+        searchQuery += " On-site";
+      } else if (this.state.session.workplace === "HYBRID") {
+        searchQuery += " Hybrid";
+      }
 
-      switch (request.action) {
-        case "startApplying":
-          await this.startJobApplicationProcess(request, sendResponse);
-          break;
+      // Encode the search query
+      const encodedQuery = encodeURIComponent(searchQuery);
+      const searchUrl = `https://www.google.com/search?q=${encodedQuery}`;
 
-        case "navigationComplete":
-          if (sender.tab?.id === STORE.tasks.search.tabId) {
-            STORE.searchTabTimestamp = Date.now();
-            saveStoreToStorage();
-            sendResponse({ status: "success" });
-          }
-          break;
-
-        case "statusUpdate":
-          // Save status update to store for debugging
-          if (!STORE.statusUpdates) {
-            STORE.statusUpdates = [];
-          }
-
-          STORE.statusUpdates.push({
-            timestamp: new Date().toISOString(),
-            ...request,
+      // Create window or tab as needed
+      if (this.state.windowId) {
+        try {
+          await chrome.windows.get(this.state.windowId);
+          // Create tab in existing window
+          const tab = await chrome.tabs.create({
+            url: searchUrl,
+            windowId: this.state.windowId,
           });
+          this.state.searchTabId = tab.id;
+        } catch (error) {
+          // Window doesn't exist, create new one
+          const window = await chrome.windows.create({
+            url: searchUrl,
+            state: "maximized",
+          });
+          this.state.windowId = window.id;
+          this.state.searchTabId = window.tabs[0].id;
+        }
+      } else {
+        // No window, create new one
+        const window = await chrome.windows.create({
+          url: searchUrl,
+          state: "maximized",
+        });
+        this.state.windowId = window.id;
+        this.state.searchTabId = window.tabs[0].id;
+      }
+    } catch (error) {
+      console.error("Error recreating search tab:", error);
+    }
+  },
 
-          if (STORE.statusUpdates.length > 50) {
-            STORE.statusUpdates.shift();
-          }
+  /**
+   * Handle connection request from content scripts
+   */
+  handleWorkableConnect(port) {
+    console.log("New connection established:", port.name);
+    this.state.lastActivity = Date.now();
 
-          saveStoreToStorage();
-          sendResponse({ status: "success" });
+    // Register message handler for this port
+    port.onMessage.addListener((message) => {
+      this.handlePortMessage(message, port);
+    });
+
+    // Handle port disconnection
+    port.onDisconnect.addListener(() => {
+      console.log("Port disconnected:", port.name);
+    });
+
+    // Extract tab ID from port name (format: workable-TYPE-TABID)
+    const portNameParts = port.name.split("-");
+    if (portNameParts.length >= 3) {
+      const tabId = parseInt(portNameParts[2]);
+      const type = portNameParts[1];
+
+      // Update our tab IDs if appropriate
+      if (
+        type === "search" &&
+        this.state.started &&
+        !this.state.applicationInProgress
+      ) {
+        this.state.searchTabId = tabId;
+      } else if (
+        type === "apply" &&
+        this.state.applicationInProgress &&
+        !this.state.applyTabId
+      ) {
+        this.state.applyTabId = tabId;
+      }
+    }
+  },
+
+  /**
+   * Send a response through the port
+   */
+  sendPortResponse(port, message) {
+    try {
+      if (port && port.sender) {
+        port.postMessage(message);
+      }
+    } catch (error) {
+      console.warn("Failed to send port response:", error);
+    }
+  },
+
+  /**
+   * Handle one-off messages (not using long-lived connections)
+   */
+  handleWorkableMessage(request, sender, sendResponse) {
+    try {
+      console.log("One-off message received:", request);
+      this.state.lastActivity = Date.now();
+
+      const { action, type } = request;
+      const messageType = action || type;
+
+      switch (messageType) {
+        case "startApplying":
+          this.handleStartApplyingMessage(request, sendResponse);
           break;
 
-        case "processJobs":
-          if (sender.tab?.id === STORE.tasks.search.tabId) {
-            STORE.searchTabTimestamp = Date.now();
-            saveStoreToStorage();
+        case "checkState":
+          sendResponse({
+            success: true,
+            data: {
+              started: this.state.started,
+              applicationInProgress: this.state.applicationInProgress,
+              searchTabId: this.state.searchTabId,
+              applyTabId: this.state.applyTabId,
+              jobsApplied: this.state.jobsApplied,
+              jobsLimit: this.state.jobsLimit,
+            },
+          });
+          break;
 
-            await chrome.tabs.sendMessage(STORE.tasks.search.tabId, {
-              action: "processJobs",
-              userId: request.userId,
-              jobsToApply: request.jobsToApply,
-            });
+        case "resetState":
+          this.resetState();
+          sendResponse({
+            success: true,
+            message: "State has been reset",
+          });
+          break;
 
-            sendResponse({ status: "processing" });
-          }
+        case "getProfileData":
+          this.handleGetProfileDataMessage(request, sendResponse);
           break;
 
         case "openJobInNewTab":
-          const tabId = await this.openJobInNewTab(
-            request.url,
-            request.country,
-            request.city,
-            request.workplace
-          );
-
-          sendResponse({ status: "success", tabId: tabId });
+          this.handleOpenJobInNewTab(request, sendResponse);
           break;
 
-        case "closeCurrentTab":
-          await this.closeTab(sender.tab.id);
-          sendResponse({ status: "success" });
+        case "applicationCompleted":
+          this.handleApplicationCompletedMessage(request, sender, sendResponse);
           break;
 
-        case "sendCvTaskSkip":
-          logDebug("Skipping job", {
-            url: request.url,
-            message: request.message,
-          });
-          await cvNotSubmitted(
-            sendResponse,
-            request.url,
-            "SKIP",
-            request.message
-          );
+        case "applicationError":
+          this.handleApplicationErrorMessage(request, sender, sendResponse);
           break;
 
-        case "sendCvTaskDone":
-          logDebug("CV task completed successfully", { url: request.url });
-
-          STORE.applyTabOpened = null;
-          STORE.searchTabTimestamp = Date.now();
-          STORE.submittedLinks.push({
-            url: request.url,
-            details: null,
-            status: "SUCCESS",
-          });
-          STORE.successfulSubmissions++;
-          await saveStoreToStorage();
-
-          await fetchWithRetry(`${buildServerUrl()}/cv-submitted`, {
-            body: JSON.stringify({ url: request.url }),
-            method: "PUT",
-            headers: buildFetchHeaders(),
-          })
-            .then(handleJsonFetchResponse)
-            .then(async (data) => {
-              // Update session data
-              STORE.session = data;
-              await saveStoreToStorage();
-
-              await chrome.tabs.remove(sender.tab.id);
-
-              if (sendResponse) {
-                sendResponse({ status: "success" });
-              }
-
-              STORE.tasks.sendCv = { ...SEND_CV_TASK_DEFAULT };
-              await saveStoreToStorage();
-
-              const { liftsLimit, liftsCurrent } = data;
-              logDebug("CV submitted response", { liftsLimit, liftsCurrent });
-
-              if (liftsCurrent >= liftsLimit) {
-                return finishSuccess("lifts-out");
-              } else {
-                return chrome.tabs.sendMessage(STORE.tasks.search.tabId, {
-                  action: "searchNext",
-                  data: { url: request.url, status: "SUCCESS" },
-                });
-              }
-            })
-            .catch((error) => {
-              logDebug("Error in sendCvTaskDone", {
-                error: errorToString(error),
-              });
-              logConsoleAndSendToServerAndSendResponseIfNeed(
-                error,
-                sendResponse
-              );
-            });
+        case "applicationSkipped":
+          this.handleApplicationSkippedMessage(request, sender, sendResponse);
           break;
 
-        case "sendCvTaskError":
-          logDebug("CV task failed", {
-            url: request.url,
-            message: request.message,
-          });
-          await cvNotSubmitted(
-            sendResponse,
-            request.url,
-            "ERROR",
-            request.message
-          );
-          break;
-
-        case "getVacancyFieldsValues":
-          logDebug("Getting vacancy fields values", {
-            url: request.data?.url || "Unknown URL",
-          });
-
-          await fetchWithRetry(
-            `${buildServerUrl()}/vacancy-fields-values`,
-            {
-              body: JSON.stringify(request.data),
-              method: "POST",
-              headers: buildFetchHeaders(),
-            },
-            GET_VACANCY_FIELDS_VALUES_TIMEOUT,
-            GET_VACANCY_FIELDS_VALUES_TIMEOUT,
-            15000
-          )
-            .then(handleJsonFetchResponse)
-            .then((data) => {
-              logDebug("Got vacancy fields values", {
-                dataSize: JSON.stringify(data).length,
-              });
-
-              sendResponse({
-                status: "success",
-                data,
-              });
-            })
-            .catch((error) => {
-              logDebug("Error getting vacancy fields values", {
-                error: errorToString(error),
-              });
-
-              console.error(error);
-
-              if (error.message.includes("Session reached max lifts limit.")) {
-                finishSuccess("lifts-out").catch((err) => {
-                  logDebug("Error finishing after limit reached", {
-                    error: errorToString(err),
-                  });
-                });
-              }
-
-              sendResponse({
-                status: "error",
-                message: error.message,
-              });
-            });
-          break;
-
-        case "keepAlive":
-          if (sender.tab?.id === STORE.tasks.sendCv.tabId) {
-            STORE.applyTabTimestamp = Date.now();
-            saveStoreToStorage();
-            logDebug("Received keepAlive ping from apply tab", {
-              tabId: sender.tab.id,
-            });
-          }
-          sendResponse({ status: "success" });
-          break;
-
-        case "getDebugInfo":
+        default:
           sendResponse({
-            status: "success",
-            store: { ...STORE },
-            timestamp: new Date().toISOString(),
+            success: false,
+            message: "Unknown message type: " + messageType,
+          });
+      }
+    } catch (error) {
+      console.error("Error in handleWorkableMessage:", error);
+      sendResponse({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    return true; // Keep the message channel open for async response
+  },
+
+  /**
+   * Handle GET_SEARCH_TASK message
+   */
+  handleGetSearchTask(port) {
+    this.sendPortResponse(port, {
+      type: "SEARCH_TASK_DATA",
+      data: {
+        limit: this.state.jobsLimit,
+        current: this.state.jobsApplied,
+        domain: this.state.searchDomain,
+        submittedLinks: this.state.submittedLinks,
+        // Convert regex pattern to string if needed
+        searchLinkPattern:
+          /^https:\/\/([\w-]+)\.workable\.com\/(j|jobs)\/([^\/]+)\/?.*$/.toString(),
+      },
+    });
+  },
+
+  /**
+   * Handle GET_PROFILE_DATA message
+   */
+  async handleGetProfileData(url, port) {
+    try {
+      if (this.state.profile) {
+        // Use cached profile data
+        this.sendPortResponse(port, {
+          type: "PROFILE_DATA",
+          data: this.state.profile,
+        });
+        return;
+      }
+
+      // If no cached profile, fetch from API
+      const userId = this.state.userId;
+      if (!userId) {
+        throw new Error("User ID not available");
+      }
+
+      const response = await fetch(
+        `${this.state.serverBaseUrl}/api/user/${userId}`
+      );
+      if (!response.ok) {
+        throw new Error(`Failed to fetch user details: ${response.status}`);
+      }
+
+      const userData = await response.json();
+
+      // Format data consistently
+      const formattedData = formatUserDataForJobApplication(
+        userData,
+        userId,
+        this.state.session?.apiKey,
+        this.state.jobsLimit,
+        "workable",
+        this.state.serverBaseUrl,
+        this.state.devMode
+      );
+
+      // Cache profile data
+      this.state.profile = formattedData.profile;
+
+      // Send response
+      this.sendPortResponse(port, {
+        type: "PROFILE_DATA",
+        data: this.state.profile,
+      });
+    } catch (error) {
+      console.error("Error getting profile data:", error);
+      this.sendPortResponse(port, {
+        type: "ERROR",
+        message: "Failed to get profile data: " + error.message,
+      });
+    }
+  },
+
+  /**
+   * Handle GET_APPLICATION_TASK message
+   */
+  handleGetApplicationTask(port) {
+    this.sendPortResponse(port, {
+      type: "APPLICATION_TASK_DATA",
+      data: {
+        devMode: this.state.devMode,
+        profile: this.state.profile,
+        session: this.state.session,
+        avatarUrl: this.state.avatarUrl,
+      },
+    });
+  },
+
+  /**
+   * Handle APPLICATION_COMPLETED message
+   */
+  async handleApplicationCompleted(data, port) {
+    try {
+      const url = this.state.applicationUrl;
+
+      // Add to submitted links with SUCCESS status
+      this.state.submittedLinks.push({
+        url,
+        details: data || null,
+        status: "SUCCESS",
+        timestamp: Date.now(),
+      });
+
+      // Track job application and send to API
+      const userId = this.state.userId;
+
+      try {
+        const apiPromises = [];
+
+        if (userId) {
+          // Update application count
+          apiPromises.push(
+            fetch(`${this.state.serverBaseUrl}/api/applications`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ userId }),
+            })
+          );
+        }
+
+        if (data) {
+          // Add job to applied jobs
+          apiPromises.push(
+            fetch(`${this.state.serverBaseUrl}/api/applied-jobs`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                ...data,
+                userId,
+                applicationPlatform: "Workable",
+              }),
+            })
+          );
+        }
+
+        if (apiPromises.length > 0) {
+          await Promise.all(apiPromises);
+        }
+      } catch (apiError) {
+        console.error("API error:", apiError);
+      }
+
+      // Close the application tab
+      try {
+        if (this.state.applyTabId) {
+          await chrome.tabs.remove(this.state.applyTabId);
+        }
+      } catch (tabError) {
+        console.error("Error closing tab:", tabError);
+      }
+
+      // Send success response to the port
+      this.sendPortResponse(port, {
+        type: "SUCCESS",
+        message: "Application completed successfully",
+      });
+
+      // Increment job application counter
+      this.state.jobsApplied++;
+
+      // Reset application state
+      this.resetApplicationState();
+
+      // Check if we've reached the limit
+      if (this.state.jobsApplied >= this.state.jobsLimit) {
+        this.completeSearch("Reached application limit");
+      } else {
+        // Continue to next job
+        this.notifySearchNext({
+          url,
+          status: "SUCCESS",
+        });
+      }
+    } catch (error) {
+      console.error("Error handling application completion:", error);
+
+      // Reset application state
+      this.resetApplicationState();
+
+      // Notify search tab to continue
+      this.notifySearchNext({
+        url: this.state.applicationUrl,
+        status: "ERROR",
+        message: error.message,
+      });
+    }
+  },
+
+  /**
+   * Handle APPLICATION_ERROR message
+   */
+  async handleApplicationError(data, port) {
+    try {
+      const url = this.state.applicationUrl;
+
+      // Add to submitted links with ERROR status
+      this.state.submittedLinks.push({
+        url,
+        error: data,
+        status: "ERROR",
+        timestamp: Date.now(),
+      });
+
+      // Close the application tab
+      try {
+        if (this.state.applyTabId) {
+          await chrome.tabs.remove(this.state.applyTabId);
+        }
+      } catch (tabError) {
+        console.error("Error closing tab:", tabError);
+      }
+
+      // Send response to the port
+      this.sendPortResponse(port, {
+        type: "SUCCESS",
+        message: "Error acknowledged",
+      });
+
+      // Reset application state
+      this.resetApplicationState();
+
+      // Notify search tab to continue
+      this.notifySearchNext({
+        url,
+        status: "ERROR",
+        message: typeof data === "string" ? data : "Application error",
+      });
+    } catch (error) {
+      console.error("Error handling application error:", error);
+
+      // Reset application state
+      this.resetApplicationState();
+
+      // Try to notify search tab
+      this.notifySearchNext({
+        url: this.state.applicationUrl,
+        status: "ERROR",
+        message: "Failed to process error: " + error.message,
+      });
+    }
+  },
+
+  /**
+   * Handle APPLICATION_SKIPPED message
+   */
+  async handleApplicationSkipped(data, port) {
+    try {
+      const url = this.state.applicationUrl;
+
+      // Add to submitted links with SKIPPED status
+      this.state.submittedLinks.push({
+        url,
+        reason: data,
+        status: "SKIPPED",
+        timestamp: Date.now(),
+      });
+
+      // Close the application tab
+      try {
+        if (this.state.applyTabId) {
+          await chrome.tabs.remove(this.state.applyTabId);
+        }
+      } catch (tabError) {
+        console.error("Error closing tab:", tabError);
+      }
+
+      // Send response to the port
+      this.sendPortResponse(port, {
+        type: "SUCCESS",
+        message: "Skip acknowledged",
+      });
+
+      // Reset application state
+      this.resetApplicationState();
+
+      // Notify search tab to continue
+      this.notifySearchNext({
+        url,
+        status: "SKIPPED",
+        message: data,
+      });
+    } catch (error) {
+      console.error("Error handling application skip:", error);
+
+      // Reset application state
+      this.resetApplicationState();
+
+      // Try to notify search tab
+      this.notifySearchNext({
+        url: this.state.applicationUrl,
+        status: "ERROR",
+        message: "Failed to process skip: " + error.message,
+      });
+    }
+  },
+
+  /**
+   * Handle SEARCH_COMPLETED message
+   */
+  handleSearchCompleted() {
+    this.completeSearch("Search completed by content script");
+  },
+
+  /**
+   * Handle startApplying message
+   */
+  async handleStartApplyingMessage(request, sendResponse) {
+    try {
+      if (this.state.started) {
+        sendResponse({
+          status: "already_started",
+          platform: "workable",
+          message: "Workable job search already in progress",
+        });
+        return;
+      }
+
+      const userId = request.userId;
+      const jobsToApply = request.jobsToApply || 10;
+      this.state.devMode = request.devMode || false;
+
+      // Fetch user data
+      const response = await fetch(`${HOST}/api/user/${userId}`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch user details: ${response.status}`);
+      }
+
+      const userData = await response.json();
+
+      // Format user data
+      const formattedData = formatUserDataForJobApplication(
+        userData,
+        userId,
+        request.sessionToken,
+        jobsToApply,
+        "workable",
+        HOST,
+        this.state.devMode
+      );
+
+      // Format submitted links
+      const submittedLinks = formatApplicationsToSubmittedLinks(
+        request.submittedLinks || [],
+        "workable"
+      );
+
+      // Update state
+      this.state.submittedLinks = submittedLinks || [];
+      this.state.profile = formattedData.profile;
+      this.state.session = formattedData.session;
+      this.state.avatarUrl = formattedData.avatarUrl;
+      this.state.userId = userId;
+      this.state.serverBaseUrl = HOST;
+      this.state.jobsLimit = jobsToApply;
+
+      // Build search query
+      let searchQuery = `site:workable.com ${
+        this.state.session.role || "jobs"
+      }`;
+      if (this.state.session.country) {
+        searchQuery += ` ${this.state.session.country}`;
+      }
+      if (this.state.session.city) {
+        searchQuery += ` ${this.state.session.city}`;
+      }
+      if (this.state.session.workplace === "REMOTE") {
+        searchQuery += " Remote";
+      } else if (this.state.session.workplace === "ON_SITE") {
+        searchQuery += " On-site";
+      } else if (this.state.session.workplace === "HYBRID") {
+        searchQuery += " Hybrid";
+      }
+
+      // Create search window
+      const window = await chrome.windows.create({
+        url: `https://www.google.com/search?q=${encodeURIComponent(
+          searchQuery
+        )}`,
+        state: "maximized",
+      });
+
+      this.state.windowId = window.id;
+      this.state.searchTabId = window.tabs[0].id;
+      this.state.started = true;
+
+      sendResponse({
+        status: "started",
+        platform: "workable",
+        message: "Workable job search process initiated",
+      });
+    } catch (error) {
+      console.error("Error starting Workable job search:", error);
+      sendResponse({
+        status: "error",
+        platform: "workable",
+        message: "Failed to start Workable job search: " + error.message,
+      });
+    }
+  },
+
+  /**
+   * Handle getProfileData message
+   */
+  async handleGetProfileDataMessage(request, sendResponse) {
+    try {
+      if (this.state.profile) {
+        // Use cached profile
+        sendResponse({
+          success: true,
+          data: this.state.profile,
+        });
+        return;
+      }
+
+      // Fetch new profile data
+      const userId = this.state.userId;
+      if (!userId) {
+        throw new Error("User ID not available");
+      }
+
+      const response = await fetch(
+        `${this.state.serverBaseUrl}/api/user/${userId}`
+      );
+      if (!response.ok) {
+        throw new Error(`Failed to fetch user details: ${response.status}`);
+      }
+
+      const userData = await response.json();
+
+      // Format data
+      const formattedData = formatUserDataForJobApplication(
+        userData,
+        userId,
+        this.state.session?.apiKey,
+        this.state.jobsLimit,
+        "workable",
+        this.state.serverBaseUrl,
+        this.state.devMode
+      );
+
+      // Cache and return
+      this.state.profile = formattedData.profile;
+
+      sendResponse({
+        success: true,
+        data: this.state.profile,
+      });
+    } catch (error) {
+      console.error("Error getting profile data:", error);
+      sendResponse({
+        success: false,
+        message: error.message,
+      });
+    }
+  },
+
+  /**
+   * Handle openJobInNewTab message
+   */
+  async handleOpenJobInNewTab(request, sendResponse) {
+    try {
+      // Check if already processing a job
+      if (this.state.applicationInProgress) {
+        console.log("Already processing a job, ignoring new tab request");
+        sendResponse({
+          success: false,
+          message: "Already processing another job",
+        });
+        return;
+      }
+
+      // Update state
+      this.state.applicationInProgress = true;
+      this.state.applicationUrl = request.url;
+      this.state.applicationStartTime = Date.now();
+
+      // Create tab
+      const tab = await chrome.tabs.create({
+        url: request.url,
+        windowId: this.state.windowId,
+      });
+
+      this.state.applyTabId = tab.id;
+
+      sendResponse({
+        success: true,
+        tabId: tab.id,
+      });
+    } catch (error) {
+      // Reset state on error
+      this.resetApplicationState();
+
+      console.error("Error opening job tab:", error);
+      sendResponse({
+        success: false,
+        message: error.message,
+      });
+    }
+  },
+
+  /**
+   * Handle applicationCompleted message
+   */
+  async handleApplicationCompletedMessage(request, sender, sendResponse) {
+    try {
+      // Extract URL from request or sender
+      const url = request.url || sender.tab.url;
+
+      // Add to submitted links
+      this.state.submittedLinks.push({
+        url,
+        details: request.data || null,
+        status: "SUCCESS",
+        timestamp: Date.now(),
+      });
+
+      // Track job application and send to API
+      const userId = this.state.userId;
+
+      try {
+        const apiPromises = [];
+
+        if (userId) {
+          apiPromises.push(
+            fetch(`${this.state.serverBaseUrl}/api/applications`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ userId }),
+            })
+          );
+        }
+
+        if (request.data) {
+          apiPromises.push(
+            fetch(`${this.state.serverBaseUrl}/api/applied-jobs`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                ...request.data,
+                userId,
+                applicationPlatform: "Workable",
+              }),
+            })
+          );
+        }
+
+        if (apiPromises.length > 0) {
+          await Promise.all(apiPromises);
+        }
+      } catch (apiError) {
+        console.error("API error:", apiError);
+      }
+
+      // Close the tab
+      try {
+        if (sender.tab?.id) {
+          await chrome.tabs.remove(sender.tab.id);
+        } else if (this.state.applyTabId) {
+          await chrome.tabs.remove(this.state.applyTabId);
+        }
+      } catch (tabError) {
+        console.error("Error closing tab:", tabError);
+      }
+
+      // Increment count
+      this.state.jobsApplied++;
+
+      // Send response
+      sendResponse({ status: "success" });
+
+      // Reset application state
+      this.resetApplicationState();
+
+      // Check if we've reached the limit
+      if (this.state.jobsApplied >= this.state.jobsLimit) {
+        this.completeSearch("Reached application limit");
+      } else {
+        // Notify search tab
+        this.notifySearchNext({
+          url,
+          status: "SUCCESS",
+        });
+      }
+    } catch (error) {
+      console.error("Error handling application completion message:", error);
+      sendResponse({ status: "error", message: error.message });
+
+      // Reset and continue
+      this.resetApplicationState();
+      this.notifySearchNext({
+        url: request.url || sender.tab.url,
+        status: "ERROR",
+        message: error.message,
+      });
+    }
+  },
+
+  /**
+   * Handle applicationError message
+   */
+  async handleApplicationErrorMessage(request, sender, sendResponse) {
+    try {
+      // Extract URL from request or sender
+      const url = request.url || sender.tab.url;
+
+      // Add to submitted links
+      this.state.submittedLinks.push({
+        url,
+        error: request.message,
+        status: "ERROR",
+        timestamp: Date.now(),
+      });
+
+      // Close the tab
+      try {
+        if (sender.tab?.id) {
+          await chrome.tabs.remove(sender.tab.id);
+        } else if (this.state.applyTabId) {
+          await chrome.tabs.remove(this.state.applyTabId);
+        }
+      } catch (tabError) {
+        console.error("Error closing tab:", tabError);
+      }
+
+      // Send response
+      sendResponse({ status: "success" });
+
+      // Reset application state
+      this.resetApplicationState();
+
+      // Notify search tab
+      this.notifySearchNext({
+        url,
+        status: "ERROR",
+        message: request.message || "Application error",
+      });
+    } catch (error) {
+      console.error("Error handling application error message:", error);
+      sendResponse({ status: "error", message: error.message });
+
+      // Reset and continue
+      this.resetApplicationState();
+      this.notifySearchNext({
+        url: request.url || sender.tab.url,
+        status: "ERROR",
+        message: error.message,
+      });
+    }
+  },
+
+  /**
+   * Handle applicationSkipped message
+   */
+  async handleApplicationSkippedMessage(request, sender, sendResponse) {
+    try {
+      // Extract URL from request or sender
+      const url = request.url || sender.tab.url;
+
+      // Add to submitted links
+      this.state.submittedLinks.push({
+        url,
+        reason: request.message,
+        status: "SKIPPED",
+        timestamp: Date.now(),
+      });
+
+      // Close the tab
+      try {
+        if (sender.tab?.id) {
+          await chrome.tabs.remove(sender.tab.id);
+        } else if (this.state.applyTabId) {
+          await chrome.tabs.remove(this.state.applyTabId);
+        }
+      } catch (tabError) {
+        console.error("Error closing tab:", tabError);
+      }
+
+      // Send response
+      sendResponse({ status: "success" });
+
+      // Reset application state
+      this.resetApplicationState();
+
+      // Notify search tab
+      this.notifySearchNext({
+        url,
+        status: "SKIPPED",
+        message: request.message || "Skipped application",
+      });
+    } catch (error) {
+      console.error("Error handling application skip message:", error);
+      sendResponse({ status: "error", message: error.message });
+
+      // Reset and continue
+      this.resetApplicationState();
+      this.notifySearchNext({
+        url: request.url || sender.tab.url,
+        status: "ERROR",
+        message: error.message,
+      });
+    }
+  },
+
+  /**
+   * Reset application state
+   */
+  resetApplicationState() {
+    this.state.applicationInProgress = false;
+    this.state.applicationUrl = null;
+    this.state.applicationStartTime = null;
+    this.state.applyTabId = null;
+  },
+
+  /**
+   * Reset the entire state
+   */
+  async resetState() {
+    try {
+      // Close apply tab if it exists
+      if (this.state.applyTabId) {
+        try {
+          await chrome.tabs.remove(this.state.applyTabId);
+        } catch (e) {
+          console.warn("Error closing apply tab:", e);
+        }
+      }
+
+      // Reset application state
+      this.resetApplicationState();
+
+      console.log("State has been reset");
+    } catch (error) {
+      console.error("Error resetting state:", error);
+    }
+  },
+
+  /**
+   * Handle tab removal to clean up state
+   */
+  handleTabRemoved(tabId, removeInfo) {
+    console.log("Tab removed:", tabId);
+    this.state.lastActivity = Date.now();
+
+    // Update state if needed
+    if (this.state.searchTabId === tabId) {
+      this.state.searchTabId = null;
+    }
+
+    if (this.state.applyTabId === tabId) {
+      // If this was the application tab and task is still active, handle as error
+      if (this.state.applicationInProgress) {
+        const url = this.state.applicationUrl;
+
+        // Mark as error in submitted links
+        if (url) {
+          this.state.submittedLinks.push({
+            url,
+            status: "ERROR",
+            error: "Tab was closed before completion",
+            timestamp: Date.now(),
+          });
+        }
+
+        // Reset application state
+        this.resetApplicationState();
+
+        // Notify search tab to continue
+        if (url) {
+          this.notifySearchNext({
+            url,
+            status: "ERROR",
+            message: "Tab was closed before completion",
+          });
+        }
+      } else {
+        // Just clear the state
+        this.state.applyTabId = null;
+      }
+    }
+  },
+
+  /**
+   * Complete the search process
+   */
+  completeSearch(reason) {
+    try {
+      console.log("Search completed:", reason);
+
+      // Show completion notification
+      try {
+        chrome.notifications.create({
+          type: "basic",
+          iconUrl: "icon.png",
+          title: "Workable Job Search Completed",
+          message: `Successfully completed ${this.state.jobsApplied} applications.`,
+        });
+      } catch (error) {
+        console.warn("Error showing notification:", error);
+      }
+
+      // Reset started state
+      this.state.started = false;
+
+      console.log("All tasks completed successfully");
+    } catch (error) {
+      console.error("Error in completeSearch:", error);
+    }
+  },
+
+  /**
+   * Notify search tab to continue to next job
+   */
+  notifySearchNext(data) {
+    try {
+      if (this.state.searchTabId) {
+        chrome.tabs.sendMessage(this.state.searchTabId, {
+          type: "SEARCH_NEXT",
+          data,
+        });
+      }
+    } catch (error) {
+      console.error("Error sending SEARCH_NEXT message:", error);
+    }
+  },
+
+  /**
+   * Check if two URLs match (after normalization)
+   */
+  isUrlMatch(url1, url2) {
+    if (!url1 || !url2) return false;
+
+    try {
+      // Normalize both URLs
+      const normalize = (url) => {
+        if (!url.startsWith("http")) {
+          url = "https://" + url;
+        }
+
+        try {
+          const urlObj = new URL(url);
+          return (urlObj.origin + urlObj.pathname)
+            .toLowerCase()
+            .trim()
+            .replace(/\/+$/, "");
+        } catch (e) {
+          return url.toLowerCase().trim();
+        }
+      };
+
+      const normalized1 = normalize(url1);
+      const normalized2 = normalize(url2);
+
+      return (
+        normalized1 === normalized2 ||
+        normalized1.includes(normalized2) ||
+        normalized2.includes(normalized1)
+      );
+    } catch (e) {
+      console.error("Error comparing URLs:", e);
+      return false;
+    }
+  },
+
+  /**
+   * Modified handlePortMessage to handle the new requestId field
+   */
+  handlePortMessage(message, port) {
+    try {
+      console.log("Port message received:", message);
+      this.state.lastActivity = Date.now();
+
+      // Extract message type, data, and requestId
+      const { type, data, requestId } = message || {};
+
+      if (!type) {
+        this.sendPortResponse(port, {
+          type: "ERROR",
+          message: "Message missing type field",
+        });
+        return;
+      }
+
+      switch (type) {
+        case "GET_SEARCH_TASK":
+          this.handleGetSearchTask(port);
+          break;
+
+        case "GET_PROFILE_DATA":
+          // Fix: data.url instead of message.url
+          this.handleGetProfileData(data?.url, port);
+          break;
+
+        case "GET_APPLICATION_TASK":
+          this.handleGetApplicationTask(port);
+          break;
+
+        case "START_APPLICATION":
+          this.handleStartApplication(data, port, requestId);
+          break;
+
+        case "APPLICATION_COMPLETED":
+          this.handleApplicationCompleted(data, port);
+          break;
+
+        case "APPLICATION_ERROR":
+          this.handleApplicationError(data, port);
+          break;
+
+        case "APPLICATION_SKIPPED":
+          this.handleApplicationSkipped(data, port);
+          break;
+
+        case "SEARCH_COMPLETED":
+          this.handleSearchCompleted();
+          break;
+
+        case "CHECK_APPLICATION_STATUS":
+          this.handleCheckApplicationStatus(port, requestId);
+          break;
+
+        case "SEARCH_NEXT_READY":
+          // Just acknowledge that the search tab is ready for next job
+          this.sendPortResponse(port, {
+            type: "NEXT_READY_ACKNOWLEDGED",
+          });
+          break;
+
+        case "KEEPALIVE":
+          // Just update the last activity time and respond
+          this.sendPortResponse(port, {
+            type: "KEEPALIVE_RESPONSE",
+            data: { timestamp: Date.now() },
           });
           break;
 
         default:
-          logDebug("Unhandled message type", { action: request.action });
-          console.log("Unhandled message type:", request.action);
-          sendResponse({ status: "error", message: "Unsupported action" });
+          console.log("Unhandled port message type:", type);
+          break; // Added this break to prevent fall-through execution
       }
     } catch (error) {
-      logDebug("Error handling message", {
-        action: request.action,
-        error: errorToString(error),
+      console.error("Error handling port message:", error);
+      this.sendPortResponse(port, {
+        type: "ERROR",
+        message: "Error handling message: " + error.message,
       });
-
-      console.error("Error in Workable handler:", error);
-      sendErrorToServer("Workable message handler error", errorToString(error));
-
-      if (sendResponse) {
-        sendResponse({ status: "error", message: error.message });
-      }
     }
-
-    return true;
   },
 
-  // Start the job application process
-  async startJobApplicationProcess(request, sendResponse) {
-    logDebug("Starting job application process", {
-      userId: request.userId,
-      jobsToApply: request.jobsToApply,
-      location: request.location,
-      country: request.country,
-      workplace: request.workplace,
+  /**
+   * Modified handleCheckApplicationStatus to include requestId for response correlation
+   */
+  handleCheckApplicationStatus(port, requestId) {
+    this.sendPortResponse(port, {
+      type: "APPLICATION_STATUS",
+      requestId: requestId,
+      data: {
+        inProgress: this.state.applicationInProgress,
+        url: this.state.applicationUrl,
+        tabId: this.state.applyTabId,
+      },
     });
 
+    // Also respond via chrome.tabs.sendMessage for redundancy
+    if (requestId && this.getTabIdFromPort(port)) {
+      try {
+        chrome.tabs.sendMessage(this.getTabIdFromPort(port), {
+          type: "APPLICATION_STATUS",
+          requestId: requestId,
+          data: {
+            inProgress: this.state.applicationInProgress,
+            url: this.state.applicationUrl,
+            tabId: this.state.applyTabId,
+          },
+        });
+      } catch (error) {
+        console.warn("Error sending redundant status message:", error);
+      }
+    }
+  },
+
+  /**
+   * Extract tab ID from port
+   */
+  getTabIdFromPort(port) {
     try {
-      // Clean up any existing session first
-      if (STORE.started && !STORE.finished) {
-        await cleanup();
+      if (port && port.sender && port.sender.tab) {
+        return port.sender.tab.id;
       }
 
-      STORE.userId = request.userId;
-      STORE.currentState = STATE.NAVIGATING_TO_JOBS;
-      STORE.started = true;
-      STORE.windowTimestamp = Date.now();
-      STORE.searchTabTimestamp = Date.now();
-      STORE.submittedLinks = [];
-      STORE.failedSubmissions = 0;
-      STORE.successfulSubmissions = 0;
-      STORE.debugLogs = [];
-
-      // If serverBaseUrl is not set, get it from the request
-      if (!STORE.serverBaseUrl && request.serverBaseUrl) {
-        STORE.serverBaseUrl = request.serverBaseUrl;
+      // Try to extract from port name
+      if (port && port.name) {
+        const parts = port.name.split("-");
+        if (parts.length >= 3 && !isNaN(parseInt(parts[2]))) {
+          return parseInt(parts[2]);
+        }
       }
 
-      // Set session data if available
-      if (request.session) {
-        STORE.session = request.session;
-      }
-
-      await saveStoreToStorage();
-
-      // Create a new window for the job application process
-      const searchUrl = getSearchUrl(request);
-      logDebug("Creating window with search URL", { searchUrl });
-
-      const window = await chrome.windows.create({
-        url: searchUrl,
-        type: "normal",
-        state: "maximized",
-      });
-
-      STORE.windowId = window.id;
-      STORE.tasks.search.tabId = window.tabs[0].id;
-      await saveStoreToStorage();
-
-      // Request keep awake to prevent system sleep
-      chrome.power.requestKeepAwake("system");
-
-      // Setup heartbeat alarm
-      await chrome.alarms.create("workableHeartbeat", {
-        delayInMinutes: 1,
-        periodInMinutes: 1,
-      });
-
-      logDebug("Created heartbeat alarm");
-
-      // Wait for the page to load
-      logDebug("Waiting for search page to load");
-      await new Promise((resolve) => {
-        const listener = (tabId, changeInfo) => {
-          if (
-            tabId === STORE.tasks.search.tabId &&
-            changeInfo.status === "complete"
-          ) {
-            chrome.tabs.onUpdated.removeListener(listener);
-            resolve();
-          }
-        };
-        chrome.tabs.onUpdated.addListener(listener);
-
-        // Set a timeout to prevent hanging if page never loads
-        setTimeout(() => {
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }, 30000);
-      });
-
-      logDebug("Search page loaded, initializing content script");
-
-      // Check if tab still exists
-      try {
-        await chrome.tabs.get(STORE.tasks.search.tabId);
-      } catch (error) {
-        logDebug("Search tab no longer exists", {
-          error: errorToString(error),
-        });
-        throw new Error("Search tab was closed");
-      }
-
-      // Send initialization message to the content script
-      try {
-        await chrome.tabs.sendMessage(STORE.tasks.search.tabId, {
-          action: "initializeSearch",
-          userId: request.userId,
-          jobsToApply: request.jobsToApply,
-          location: request.location,
-          country: request.country,
-          workplace: request.workplace,
-          serverBaseUrl: STORE.serverBaseUrl,
-          session: STORE.session,
-        });
-
-        logDebug("Sent initialization message to content script");
-      } catch (error) {
-        logDebug("Error sending initialization message", {
-          error: errorToString(error),
-        });
-        throw new Error(
-          "Failed to initialize content script: " + error.message
-        );
-      }
-
-      await saveStoreToStorage();
-
-      if (sendResponse) {
-        sendResponse({
-          status: "started",
-          platform: "workable",
-          message: "Job search process initiated on Workable",
-          jobsToApply: request.jobsToApply,
-        });
-      }
+      return null;
     } catch (error) {
-      logDebug("Error starting job application process", {
-        error: errorToString(error),
-      });
-      console.error("Error starting Workable job application process:", error);
-      sendErrorToServer(
-        "Error starting Workable job application",
-        errorToString(error)
+      console.warn("Error extracting tab ID from port:", error);
+      return null;
+    }
+  },
+
+  /**
+   * Modified handleStartApplication with improved error handling and duplicate detection
+   */
+  async handleStartApplication(data, port, requestId) {
+    try {
+      // Check if already processing an application
+      if (this.state.applicationInProgress) {
+        console.log("Already have an active application, ignoring new request");
+
+        // Send response to port
+        // this.sendPortResponse(port, {
+        //   type: "ERROR",
+        //   message: "An application is already in progress",
+        // });
+
+        // Also send response message for the specific request
+        if (requestId && this.getTabIdFromPort(port)) {
+          chrome.tabs.sendMessage(this.getTabIdFromPort(port), {
+            type: "APPLICATION_START_RESPONSE",
+            requestId,
+            success: false,
+            message: "An application is already in progress",
+          });
+        }
+
+        return;
+      }
+
+      // Check if URL already processed
+      const url = data.url;
+      const isDuplicate = this.state.submittedLinks.some((link) =>
+        this.isUrlMatch(link.url, url)
       );
 
-      // Clean up in case of error
-      if (STORE.windowId) {
+      if (isDuplicate) {
+        console.log("URL already processed:", url);
+
+        // Send responses
+        this.sendPortResponse(port, {
+          type: "DUPLICATE",
+          message: "This job has already been processed",
+          data: { url },
+        });
+
+        if (requestId && this.getTabIdFromPort(port)) {
+          chrome.tabs.sendMessage(this.getTabIdFromPort(port), {
+            type: "APPLICATION_START_RESPONSE",
+            requestId,
+            success: false,
+            duplicate: true,
+            message: "This job has already been processed",
+          });
+        }
+
+        return;
+      }
+
+      // Set state before proceeding
+      this.state.applicationInProgress = true;
+      this.state.applicationUrl = url;
+      this.state.applicationStartTime = Date.now();
+
+      // Add to submitted links with PROCESSING status
+      this.state.submittedLinks.push({
+        url,
+        status: "PROCESSING",
+        timestamp: Date.now(),
+      });
+
+      // Acknowledge the request
+      this.sendPortResponse(port, {
+        type: "APPLICATION_STARTING",
+        data: { url },
+      });
+
+      // Also send specific response to the request
+      if (requestId && this.getTabIdFromPort(port)) {
+        chrome.tabs.sendMessage(this.getTabIdFromPort(port), {
+          type: "APPLICATION_START_RESPONSE",
+          requestId,
+          success: true,
+          data: { url },
+        });
+      }
+
+      // Create the application tab
+      try {
+        const tab = await chrome.tabs.create({
+          url,
+          windowId: this.state.windowId,
+          active: true, // Make it the active tab
+        });
+
+        this.state.applyTabId = tab.id;
+        console.log("Application tab created:", tab.id);
+      } catch (error) {
+        console.error("Error creating application tab:", error);
+
+        // Reset application state on error
+        this.resetApplicationState();
+
+        // Remove from submitted links
+        const index = this.state.submittedLinks.findIndex((link) =>
+          this.isUrlMatch(link.url, url)
+        );
+
+        if (index !== -1) {
+          this.state.submittedLinks.splice(index, 1);
+        }
+
+        // Notify search tab of error
+        this.notifySearchNext({
+          url,
+          status: "ERROR",
+          message: "Failed to create application tab: " + error.message,
+        });
+      }
+    } catch (error) {
+      console.error("Error starting application:", error);
+
+      // Send error responses
+      this.sendPortResponse(port, {
+        type: "ERROR",
+        message: "Error starting application: " + error.message,
+      });
+
+      if (requestId && this.getTabIdFromPort(port)) {
+        chrome.tabs.sendMessage(this.getTabIdFromPort(port), {
+          type: "APPLICATION_START_RESPONSE",
+          requestId,
+          success: false,
+          message: "Error starting application: " + error.message,
+        });
+      }
+
+      // Reset application state on error
+      this.resetApplicationState();
+    }
+  },
+
+  /**
+   * Handle window removal event
+   * @param {number} windowId - ID of the removed window
+   */
+  handleWindowRemoved(windowId) {
+    console.log("Window removed:", windowId);
+
+    // Check if it's our automation window
+    if (this.state.windowId === windowId) {
+      console.log("Automation window was closed by user, stopping automation");
+      this.stopAutomation("Window closed by user");
+    }
+  },
+
+  /**
+   * Comprehensive method to stop automation and clean up
+   * @param {string} reason - Reason for stopping
+   */
+  stopAutomation(reason) {
+    try {
+      console.log(`Stopping automation: ${reason}`);
+
+      // Close apply tab if it exists
+      if (this.state.applyTabId) {
         try {
-          await chrome.windows.remove(STORE.windowId);
+          chrome.tabs.remove(this.state.applyTabId);
         } catch (e) {
-          console.error("Error cleaning up window:", e);
+          console.warn("Error closing apply tab:", e);
         }
-        STORE.windowId = null;
       }
 
-      await cleanup();
+      // Reset application state
+      this.resetApplicationState();
 
-      if (sendResponse) {
-        sendResponse({
-          status: "error",
-          platform: "workable",
-          message: "Failed to start job search: " + error.message,
-        });
-      }
-    }
-  },
+      // Reset search state while preserving user profile data
+      this.state.started = false;
+      this.state.windowId = null;
+      this.state.searchTabId = null;
 
-  // Navigate to a specific job URL
-  async navigateToJob(url) {
-    logDebug("Navigating to job", { url });
-
-    if (!STORE.tasks.search.tabId) {
-      throw new Error("No active tab available");
-    }
-
-    await chrome.tabs.update(STORE.tasks.search.tabId, { url });
-
-    // Wait for navigation to complete
-    await new Promise((resolve) => {
-      const listener = (tabId, changeInfo) => {
-        if (
-          tabId === STORE.tasks.search.tabId &&
-          changeInfo.status === "complete"
-        ) {
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
+      // Show notification if we had applied to any jobs
+      if (this.state.jobsApplied > 0) {
+        try {
+          chrome.notifications.create({
+            type: "basic",
+            iconUrl: "icon.png",
+            title: "Workable Job Search Stopped",
+            message: `Automation stopped: ${reason}. Applied to ${this.state.jobsApplied} jobs.`,
+          });
+        } catch (error) {
+          console.warn("Error showing notification:", error);
         }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-
-      // Set a timeout to prevent hanging
-      setTimeout(() => {
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }, 30000);
-    });
-
-    await chrome.tabs.sendMessage(STORE.tasks.search.tabId, {
-      action: "navigationComplete",
-    });
-
-    logDebug("Navigation to job complete");
-  },
-
-  // Open a job in a new tab
-  async openJobInNewTab(url, country, city, workplace) {
-    logDebug("Opening job in new tab", { url, country, city, workplace });
-
-    try {
-      // Check if the window still exists
-      try {
-        await chrome.windows.get(STORE.windowId);
-      } catch (error) {
-        logDebug("Window not found, recreating", {
-          error: errorToString(error),
-        });
-
-        // Create a new window
-        const window = await chrome.windows.create({
-          type: "normal",
-          state: "maximized",
-        });
-
-        STORE.windowId = window.id;
-        await saveStoreToStorage();
       }
 
-      // Append /apply/ to the URL if it doesn't end with it
-      let finalUrl = url;
-      if (finalUrl.endsWith("/")) {
-        finalUrl = finalUrl + "apply/";
-      } else if (!finalUrl.endsWith("/apply/")) {
-        finalUrl = finalUrl + "/apply/";
-      }
+      // // Save applied job data before stopping
+      // if (this.state.userId && this.state.jobsApplied > 0) {
+      //   try {
+      //     fetch(`${this.state.serverBaseUrl}/api/automation-sessions`, {
+      //       method: "POST",
+      //       headers: { "Content-Type": "application/json" },
+      //       body: JSON.stringify({
+      //         userId: this.state.userId,
+      //         platform: "workable",
+      //         jobsApplied: this.state.jobsApplied,
+      //         status: "stopped",
+      //         reason: reason,
+      //       }),
+      //     });
+      //   } catch (error) {
+      //     console.error("Error saving session data:", error);
+      //   }
+      // }
 
-      logDebug("Final URL for job tab", { finalUrl });
-
-      // Create a new tab in the same window
-      const tab = await chrome.tabs.create({
-        url: finalUrl,
-        windowId: STORE.windowId,
-        active: true, // Make the new tab active
-      });
-
-      STORE.tasks.sendCv.url = url;
-      STORE.tasks.sendCv.tabId = tab.id;
-      STORE.tasks.sendCv.active = true;
-      STORE.tasks.sendCv.finalUrl = finalUrl;
-      STORE.applyTabOpened = Date.now();
-      STORE.applyTabTimestamp = Date.now();
-
-      await saveStoreToStorage();
-
-      logDebug("Created new tab for job", { tabId: tab.id });
-
-      // Wait for the tab to load
-      await new Promise((resolve) => {
-        const listener = (tabId, changeInfo) => {
-          if (tabId === tab.id && changeInfo.status === "complete") {
-            chrome.tabs.onUpdated.removeListener(listener);
-            resolve();
-          }
-        };
-        chrome.tabs.onUpdated.addListener(listener);
-
-        // Set a timeout to prevent hanging
-        setTimeout(() => {
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }, 30000);
-      });
-
-      logDebug("Job tab loaded, initializing content script");
-
-      // Check if tab still exists
-      try {
-        await chrome.tabs.get(tab.id);
-      } catch (error) {
-        logDebug("Job tab no longer exists", { error: errorToString(error) });
-        throw new Error("Job tab was closed");
-      }
-
-      // Send initialization data to the new tab
-      try {
-        await chrome.tabs.sendMessage(tab.id, {
-          action: "initializeJobTab",
-          userId: STORE.userId,
-          country: country,
-          city: city,
-          workplace: workplace,
-          serverBaseUrl: STORE.serverBaseUrl,
-          session: STORE.session,
-        });
-
-        logDebug("Sent initialization message to job tab");
-      } catch (error) {
-        logDebug("Error sending initialization message to job tab", {
-          error: errorToString(error),
-        });
-        throw new Error("Failed to initialize job tab: " + error.message);
-      }
-
-      return tab.id;
+      console.log("Automation stopped successfully");
     } catch (error) {
-      logDebug("Error opening job in new tab", { error: errorToString(error) });
-      console.error("Error opening job in new tab:", error);
-      throw error;
+      console.error("Error stopping automation:", error);
     }
   },
 
-  // Close a specific tab
-  async closeTab(tabId) {
-    logDebug("Closing tab", { tabId });
-
+  /**
+   * Improved resetState method that completely resets all automation state
+   * This enhances the existing resetState method
+   */
+  async resetState() {
     try {
-      await chrome.tabs.remove(tabId);
-      logDebug("Tab closed successfully");
+      // Close apply tab if it exists
+      if (this.state.applyTabId) {
+        try {
+          await chrome.tabs.remove(this.state.applyTabId);
+        } catch (e) {
+          console.warn("Error closing apply tab:", e);
+        }
+      }
+
+      // Reset application state
+      this.resetApplicationState();
+
+      // Reset search state but preserve user data
+      this.state.started = false;
+      this.state.jobsApplied = 0;
+      this.state.submittedLinks = [];
+
+      console.log("State has been reset");
     } catch (error) {
-      logDebug("Error closing tab", { error: errorToString(error) });
-      console.error("Error closing tab:", error);
+      console.error("Error resetting state:", error);
     }
   },
 };
-
-// Initialize extension
-WorkableJobApplyManager.init();
 
 export { WorkableJobApplyManager };

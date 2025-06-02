@@ -1,17 +1,17 @@
-// recruiteeBackground.js
 import { HOST } from "@shared/constants";
 import {
   formatUserDataForJobApplication,
   formatApplicationsToSubmittedLinks,
 } from "@shared/userDataFormatter";
+import { getJobURL } from "@shared/utils";
 
-console.log("Recruitee Background Script Initialized");
+console.log("indeed_glassdoor Background Script Initialized");
 
 /**
- * RecruiteeJobApplyManager - Background script for managing Recruitee job applications
- * Following the same robust implementation pattern as Workable with clear state management
+ * JobApplyManager - Background script for managing job applications on Indeed and Glassdoor
+ * Supports both platforms with platform-specific handling where needed
  */
-const RecruiteeJobApplyManager = {
+const JobApplyManager = {
   // State management
   state: {
     // Session data
@@ -36,8 +36,11 @@ const RecruiteeJobApplyManager = {
     // Job search parameters
     jobsLimit: 100,
     jobsApplied: 0,
-    searchDomain: ["recruitee.com"],
+    searchDomain: ["indeed.com", "glassdoor.com"],
     submittedLinks: [],
+
+    // Platform
+    platform: null, // 'indeed' or 'glassdoor'
 
     // Last activity timestamp for health check
     lastActivity: Date.now(),
@@ -47,13 +50,12 @@ const RecruiteeJobApplyManager = {
    * Initialize the manager
    */
   async init() {
-    console.log("Recruitee Job Manager initialized");
+    console.log("Job Apply Manager initialized");
 
     // Set up message listeners
-    chrome.runtime.onConnect.addListener(
-      this.handleRecruiteeConnect.bind(this)
-    );
-    chrome.runtime.onMessage.addListener(this.handleRecruiteeMessage.bind(this));
+    chrome.runtime.onConnect.addListener(this.handleConnect.bind(this));
+    chrome.runtime.onMessage.addListener(this.handleIndeedMessage.bind(this));
+    chrome.runtime.onMessage.addListener(this.handleGlassdoorMessage.bind(this));
 
     // Set up tab removal listener
     chrome.tabs.onRemoved.addListener(this.handleTabRemoved.bind(this));
@@ -63,7 +65,7 @@ const RecruiteeJobApplyManager = {
   },
 
   create() {
-    return new RecruiteeJobApplyManager();
+    return new JobApplyManager();
   },
 
   /**
@@ -162,29 +164,67 @@ const RecruiteeJobApplyManager = {
    */
   async recreateSearchTab() {
     if (!this.state.started || !this.state.session) return;
-
+    console.log(this.state.platform);
     try {
-      // Build search query
-      let searchQuery = `site:recruitee.com ${
-        this.state.session.role || "jobs"
-      }`;
-      if (this.state.session.country) {
-        searchQuery += ` ${this.state.session.country}`;
-      }
-      if (this.state.session.city) {
-        searchQuery += ` ${this.state.session.city}`;
-      }
-      if (this.state.session.workplace === "REMOTE") {
-        searchQuery += " Remote";
-      } else if (this.state.session.workplace === "ON_SITE") {
-        searchQuery += " On-site";
-      } else if (this.state.session.workplace === "HYBRID") {
-        searchQuery += " Hybrid";
+      // Build search URL based on platform
+      let searchUrl;
+      const searchParams = new URLSearchParams();
+
+      if (this.state.platform === "indeed") {
+        console.log("indeed session", this.state);
+        searchUrl = getJobURL(this.state.session.country);
+
+        // Add search parameters
+        if (this.state.session.role) {
+          searchParams.append("q", this.state.session.role);
+        }
+
+        if (this.state.session.location) {
+          searchParams.append("l", this.state.session.location);
+        }
+
+        if (this.state.session.country) {
+          // Country might be used in different ways depending on Indeed's structure
+          searchParams.append("sc", this.state.session.country);
+        }
+
+        if (this.state.session.workplace === "REMOTE") {
+          searchParams.append("remotejob", "1");
+        }
+      } else if (this.state.platform === "glassdoor") {
+        searchUrl = "https://www.glassdoor.com/Job/index.htm";
+
+        // Add search parameters for Glassdoor
+        if (this.state.session.role) {
+          searchParams.append("sc.keyword", this.state.session.role);
+        }
+
+        if (this.state.session.location) {
+          searchParams.append("locT", "C");
+          searchParams.append("locId", "0"); // This would need to be dynamically determined
+          searchParams.append("locKeyword", this.state.session.location);
+        }
+
+        if (this.state.session.workplace === "REMOTE") {
+          searchParams.append("remoteWorkType", "1");
+        }
+      } else {
+        // Default to Indeed if platform is not specified
+        searchUrl = "https://www.indeed.com/jobs";
+
+        if (this.state.session.role) {
+          searchParams.append("q", this.state.session.role);
+        }
+
+        if (this.state.session.location) {
+          searchParams.append("l", this.state.session.location);
+        }
       }
 
-      // Encode the search query
-      const encodedQuery = encodeURIComponent(searchQuery);
-      const searchUrl = `https://www.google.com/search?q=${encodedQuery}`;
+      // Complete search URL with parameters
+      if (searchParams.toString()) {
+        searchUrl += "?" + searchParams.toString();
+      }
 
       // Create window or tab as needed
       if (this.state.windowId) {
@@ -222,9 +262,16 @@ const RecruiteeJobApplyManager = {
   /**
    * Handle connection request from content scripts
    */
-  handleRecruiteeConnect(port) {
+  handleConnect(port) {
     console.log("New connection established:", port.name);
     this.state.lastActivity = Date.now();
+
+    // Check port name for platform
+    if (port.name.includes("indeed-")) {
+      this.state.platform = "indeed";
+    } else if (port.name.includes("glassdoor-")) {
+      this.state.platform = "glassdoor";
+    }
 
     // Register message handler for this port
     port.onMessage.addListener((message) => {
@@ -236,7 +283,7 @@ const RecruiteeJobApplyManager = {
       console.log("Port disconnected:", port.name);
     });
 
-    // Extract tab ID from port name (format: recruitee-TYPE-TABID)
+    // Extract tab ID from port name (format: platform-TYPE-TABID)
     const portNameParts = port.name.split("-");
     if (portNameParts.length >= 3) {
       const tabId = parseInt(portNameParts[2]);
@@ -275,16 +322,22 @@ const RecruiteeJobApplyManager = {
   /**
    * Handle one-off messages (not using long-lived connections)
    */
-  handleRecruiteeMessage(request, sender, sendResponse) {
+  handleIndeedMessage(request, sender, sendResponse) {
     try {
       console.log("One-off message received:", request);
       this.state.lastActivity = Date.now();
 
-      const { action, type } = request;
+      const { action, type, platform } = request;
       const messageType = action || type;
+
+      // Update platform if provided in the message
+      if (platform) {
+        this.state.platform = platform;
+      }
 
       switch (messageType) {
         case "startApplying":
+          console.log(request);
           this.handleStartApplyingMessage(request, sendResponse);
           break;
 
@@ -298,6 +351,7 @@ const RecruiteeJobApplyManager = {
               applyTabId: this.state.applyTabId,
               jobsApplied: this.state.jobsApplied,
               jobsLimit: this.state.jobsLimit,
+              platform: this.state.platform,
             },
           });
           break;
@@ -337,7 +391,7 @@ const RecruiteeJobApplyManager = {
           });
       }
     } catch (error) {
-      console.error("Error in handleRecruiteeMessage:", error);
+      console.error("Error in handleIndeedMessage:", error);
       sendResponse({
         success: false,
         message: error.message,
@@ -348,9 +402,105 @@ const RecruiteeJobApplyManager = {
   },
 
   /**
+   * Handle one-off messages (not using long-lived connections)
+   */
+  handleGlassdoorMessage(request, sender, sendResponse) {
+    try {
+      console.log("One-off message received:", request);
+      this.state.lastActivity = Date.now();
+
+      const { action, type, platform } = request;
+      const messageType = action || type;
+
+      // Update platform if provided in the message
+      if (platform) {
+        this.state.platform = platform;
+      }
+
+      switch (messageType) {
+        case "startApplying":
+          console.log(request);
+          this.handleStartApplyingMessage(request, sendResponse);
+          break;
+
+        case "checkState":
+          sendResponse({
+            success: true,
+            data: {
+              started: this.state.started,
+              applicationInProgress: this.state.applicationInProgress,
+              searchTabId: this.state.searchTabId,
+              applyTabId: this.state.applyTabId,
+              jobsApplied: this.state.jobsApplied,
+              jobsLimit: this.state.jobsLimit,
+              platform: this.state.platform,
+            },
+          });
+          break;
+
+        case "resetState":
+          this.resetState();
+          sendResponse({
+            success: true,
+            message: "State has been reset",
+          });
+          break;
+
+        case "getProfileData":
+          this.handleGetProfileDataMessage(request, sendResponse);
+          break;
+
+        case "openJobInNewTab":
+          this.handleOpenJobInNewTab(request, sendResponse);
+          break;
+
+        case "applicationCompleted":
+          this.handleApplicationCompletedMessage(request, sender, sendResponse);
+          break;
+
+        case "applicationError":
+          this.handleApplicationErrorMessage(request, sender, sendResponse);
+          break;
+
+        case "applicationSkipped":
+          this.handleApplicationSkippedMessage(request, sender, sendResponse);
+          break;
+
+        default:
+          sendResponse({
+            success: false,
+            message: "Unknown message type: " + messageType,
+          });
+      }
+    } catch (error) {
+      console.error("Error in handleIndeedMessage:", error);
+      sendResponse({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    return true; // Keep the message channel open for async response
+  },
+  
+  /**
    * Handle GET_SEARCH_TASK message
    */
   handleGetSearchTask(port) {
+    // Determine search link pattern based on platform
+    let searchLinkPattern;
+    if (this.state.platform === "indeed") {
+      searchLinkPattern =
+        /^https:\/\/(www\.)?(indeed\.com\/(viewjob|job|jobs|apply)).*$/;
+    } else if (this.state.platform === "glassdoor") {
+      searchLinkPattern =
+        /^https:\/\/(www\.)?(glassdoor\.com\/(job|Job|partner|apply)).*$/;
+    } else {
+      // Default pattern that matches both
+      searchLinkPattern =
+        /^https:\/\/(www\.)?((indeed\.com\/(viewjob|job|jobs|apply))|(glassdoor\.com\/(job|Job|partner|apply))).*$/;
+    }
+
     this.sendPortResponse(port, {
       type: "SEARCH_TASK_DATA",
       data: {
@@ -358,9 +508,9 @@ const RecruiteeJobApplyManager = {
         current: this.state.jobsApplied,
         domain: this.state.searchDomain,
         submittedLinks: this.state.submittedLinks,
-        // Convert regex pattern to string if needed
-        searchLinkPattern:
-          /^https:\/\/(.*?)\.recruitee\.com\/(o|career)\/([^\/]+)\/.*$/.toString(),
+        // Convert regex pattern to string
+        searchLinkPattern: searchLinkPattern.toString(),
+        platform: this.state.platform,
       },
     });
   },
@@ -400,7 +550,7 @@ const RecruiteeJobApplyManager = {
         userId,
         this.state.session?.apiKey,
         this.state.jobsLimit,
-        "recruitee",
+        this.state.platform || "indeed", // Use detected platform
         this.state.serverBaseUrl,
         this.state.devMode
       );
@@ -433,6 +583,7 @@ const RecruiteeJobApplyManager = {
         profile: this.state.profile,
         session: this.state.session,
         avatarUrl: this.state.avatarUrl,
+        platform: this.state.platform,
       },
     });
   },
@@ -450,6 +601,7 @@ const RecruiteeJobApplyManager = {
         details: data || null,
         status: "SUCCESS",
         timestamp: Date.now(),
+        platform: this.state.platform,
       });
 
       // Track job application and send to API
@@ -478,7 +630,7 @@ const RecruiteeJobApplyManager = {
               body: JSON.stringify({
                 ...data,
                 userId,
-                applicationPlatform: "Recruitee",
+                applicationPlatform: this.state.platform || "indeed",
               }),
             })
           );
@@ -550,6 +702,7 @@ const RecruiteeJobApplyManager = {
         error: data,
         status: "ERROR",
         timestamp: Date.now(),
+        platform: this.state.platform,
       });
 
       // Close the application tab
@@ -604,6 +757,7 @@ const RecruiteeJobApplyManager = {
         reason: data,
         status: "SKIPPED",
         timestamp: Date.now(),
+        platform: this.state.platform,
       });
 
       // Close the application tab
@@ -652,31 +806,69 @@ const RecruiteeJobApplyManager = {
     this.completeSearch("Search completed by content script");
   },
 
-  /**
-   * Handle startApplying message
-   */
   async handleStartApplyingMessage(request, sendResponse) {
     try {
+      // Add detailed logging for debugging in production
+      console.log("[JobApplicator] Starting job application process", {
+        platform: request.platform,
+        devMode: request.devMode,
+        userId: request.userId,
+      });
+
+      // Validate request parameters
+      if (!request.userId) {
+        throw new Error("User ID is required");
+      }
+
+      // Check if already in progress
       if (this.state.started) {
+        console.log("[JobApplicator] Job search already in progress", {
+          platform: this.state.platform,
+        });
         sendResponse({
           status: "already_started",
-          platform: "recruitee",
-          message: "Recruitee job search already in progress",
+          platform: this.state.platform,
+          message: `${this.state.platform} job search already in progress`,
         });
         return;
       }
 
+      // Initialize state with request parameters
       const userId = request.userId;
-      const jobsToApply = request.jobsToApply || 10;
-      this.state.devMode = request.devMode || false;
+      const jobsToApply = Math.min(request.jobsToApply || 10, 50); // Limit max jobs for safety
+      this.state.devMode = Boolean(request.devMode);
+      this.state.platform = (request.platform || "indeed").toLowerCase();
 
-      // Fetch user data
-      const response = await fetch(`${HOST}/api/user/${userId}`);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch user details: ${response.status}`);
+      // Validate platform
+      if (!["indeed", "glassdoor"].includes(this.state.platform)) {
+        throw new Error(`Unsupported platform: ${this.state.platform}`);
       }
 
-      const userData = await response.json();
+      // Fetch user data with timeout and retry logic
+      let userData;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10-second timeout
+
+        const response = await fetch(`${HOST}/api/user/${userId}`, {
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          throw new Error(
+            `Failed to fetch user details: ${response.status} ${response.statusText}`
+          );
+        }
+
+        userData = await response.json();
+      } catch (error) {
+        if (error.name === "AbortError") {
+          throw new Error("User data fetch request timed out");
+        }
+        throw error;
+      }
 
       // Format user data
       const formattedData = formatUserDataForJobApplication(
@@ -684,18 +876,23 @@ const RecruiteeJobApplyManager = {
         userId,
         request.sessionToken,
         jobsToApply,
-        "recruitee",
+        this.state.platform,
         HOST,
         this.state.devMode
       );
 
-      // Format submitted links
+      // Format submitted links with validation
       const submittedLinks = formatApplicationsToSubmittedLinks(
-        request.submittedLinks || [],
-        "recruitee"
+        Array.isArray(request.submittedLinks) ? request.submittedLinks : [],
+        this.state.platform
       );
 
-      // Update state
+      // Validate essential session data
+      if (!formattedData.session?.role) {
+        console.warn("[JobApplicator] Missing job role in session data");
+      }
+
+      // Update state with validated data
       this.state.submittedLinks = submittedLinks || [];
       this.state.profile = formattedData.profile;
       this.state.session = formattedData.session;
@@ -704,51 +901,368 @@ const RecruiteeJobApplyManager = {
       this.state.serverBaseUrl = HOST;
       this.state.jobsLimit = jobsToApply;
 
-      // Build search query
-      let searchQuery = `site:recruitee.com ${
-        this.state.session.role || "jobs"
-      }`;
-      if (this.state.session.country) {
-        searchQuery += ` ${this.state.session.country}`;
-      }
-      if (this.state.session.city) {
-        searchQuery += ` ${this.state.session.city}`;
-      }
-      if (this.state.session.workplace === "REMOTE") {
-        searchQuery += " Remote";
-      } else if (this.state.session.workplace === "ON_SITE") {
-        searchQuery += " On-site";
-      } else if (this.state.session.workplace === "HYBRID") {
-        searchQuery += " Hybrid";
+      // Start building the search URL
+      let searchUrl;
+      const searchParams = new URLSearchParams();
+
+      if (this.state.platform === "indeed") {
+        // searchUrl = "https://www.indeed.com/jobs";
+        searchUrl = getJobURL(this.state.profile.country);
+
+        // Add Indeed-specific search parameters
+        if (this.state.session.role) {
+          searchParams.append("q", this.state.session.role.trim());
+        }
+        if (this.state.session.country) {
+          searchParams.append("rbl", this.state.session.country.trim());
+        }
+
+        if (this.state.session.country) {
+          searchParams.append("l", this.state.session.country.trim());
+        }
+
+        // Add date posted filter if specified
+        if (this.state.session.jobAge) {
+          searchParams.append("fromage", this.state.session.jobAge.toString());
+        }
+
+        // Add job type filter if specified
+        if (this.state.session.jobType) {
+          searchParams.append(
+            "sc",
+            this.mapJobTypeToIndeed(
+              this.state.session.jobType.replace("_", "-")
+            )
+          );
+        }
+      } else if (this.state.platform === "glassdoor") {
+        // Construct Glassdoor URL using their specific format
+
+        // Sanitize and format location/country
+        let country = "united-states"; // Default fallback
+        if (this.state.session.country) {
+          country = this.state.session.country
+            .toLowerCase()
+            .replace(/[^a-z0-9\s-]/g, "") 
+            .replace(/\s+/g, "-")   
+            .trim();
+        }
+
+        // Sanitize and format job role
+        let role = "software-engineer"; 
+        if (this.state.session.role) {
+          role = this.state.session.role
+            .toLowerCase()
+            .replace(/[^a-z0-9\s-]/g, "") 
+            .replace(/\s+/g, "-") 
+            .trim();
+        }
+
+        // Get country code mapping from a dedicated service
+        const countryMapping = await this.getGlassdoorCountryMapping(country);
+
+        // Extract the mapping details
+        const ilCode = countryMapping.ilCode;
+        const inCode = countryMapping.inCode;
+
+        // Calculate the KO parameters (key offset)
+        const koStart = country.length + 1;   
+        const koEnd = koStart + role.length;
+
+        // Construct the base Glassdoor URL with all parameters properly formatted and encoded
+        searchUrl = `https://www.glassdoor.com/Job/${encodeURIComponent(
+          country
+        )}-${encodeURIComponent(
+          role
+        )}-jobs-SRCH_${ilCode}_${inCode}_KO${koStart},${koEnd}.htm`;
+
+        // Easy Apply filter (if enabled)
+
+        searchParams.append("applicationType", "1");
+        // Remote work filter
+        if (this.state.session.workplace) {
+          searchParams.append("remoteWorkType", "1");
+        }
+
+        // Salary range filters
+        // if (this.state.session.minSalary) {
+        //   searchParams.append(
+        //     "minSalary",
+        //     this.state.session.minSalary.toString()
+        //   );
+        // }
+
+        // if (this.state.session.maxSalary) {
+        //   searchParams.append(
+        //     "maxSalary",
+        //     this.state.session.maxSalary.toString() ||
+        //       this.state.session.minSalary
+        //       ? (parseInt(this.state.session.minSalary) * 1.5).toString()
+        //       : ""
+        //   );
+        // }
+
+        // Company rating filter (1.0 to 5.0)
+        if (this.state.session.minRating) {
+          const rating = parseFloat(this.state.session.minRating);
+          // Ensure rating is between 1.0 and 5.0
+          if (rating >= 1.0 && rating <= 5.0) {
+            searchParams.append("minRating", rating.toFixed(1));
+          }
+        }
+
+        // Job age filter (days) - fromAge parameter
+        const jobAge = parseInt(this.state.session.jobAge) || ""; // Default to 3 days
+        searchParams.append("fromAge", jobAge.toString());
       }
 
-      // Create search window
-      const window = await chrome.windows.create({
-        url: `https://www.google.com/search?q=${encodeURIComponent(
-          searchQuery
-        )}`,
-        state: "maximized",
-      });
+      // Complete search URL with parameters
+      if (searchParams.toString()) {
+        searchUrl += "?" + searchParams.toString();
+      }
 
+      console.log("[JobApplicator] Opening job search URL", { searchUrl });
+
+      // Create search window with error handling
+      let window;
+      try {
+        window = await chrome.windows.create({
+          url: searchUrl,
+          state: "maximized",
+        });
+      } catch (error) {
+        throw new Error(`Failed to create browser window: ${error.message}`);
+      }
+
+      // Update state with window information
       this.state.windowId = window.id;
       this.state.searchTabId = window.tabs[0].id;
       this.state.started = true;
+      this.state.startTime = Date.now();
 
+      // Add event listeners for window close
+      chrome.windows.onRemoved.addListener(this.handleWindowClose.bind(this));
+
+      // Send success response
       sendResponse({
         status: "started",
-        platform: "recruitee",
-        message: "Recruitee job search process initiated",
+        platform: this.state.platform,
+        message: `${this.state.platform} job search process initiated`,
+        searchUrl: searchUrl, // Include the URL for debugging
       });
+
+      // Start monitoring the process
+      this.startMonitoring();
     } catch (error) {
-      console.error("Error starting Recruitee job search:", error);
+      // Comprehensive error handling with detailed logging
+      console.error(
+        `[JobApplicator] Error starting ${
+          this.state.platform || "job"
+        } search:`,
+        error
+      );
+
+      // Reset state in case of failure
+      this.resetState();
+
+      // Send detailed error response
       sendResponse({
         status: "error",
-        platform: "recruitee",
-        message: "Failed to start Recruitee job search: " + error.message,
+        platform: this.state.platform || request.platform || "unknown",
+        message: `Failed to start job search: ${error.message}`,
+        errorCode: this.categorizeError(error),
+        errorDetails: error.stack,
       });
     }
   },
 
+  // Helper method to get Glassdoor country mapping
+  async getGlassdoorCountryMapping(country) {
+    try {
+      // Comprehensive mapping table for Glassdoor country codes
+      const countryMappings = {
+        // Existing mappings
+        nigeria: { ilCode: "IL.0,7", inCode: "IN177" },
+        "united-states": { ilCode: "IL.0,13", inCode: "IN1" },
+        india: { ilCode: "IL.0,5", inCode: "IN115" },
+        "united-kingdom": { ilCode: "IL.0,14", inCode: "IN2" },
+        canada: { ilCode: "IL.0,6", inCode: "IN3" },
+        australia: { ilCode: "IL.0,9", inCode: "IN16" },
+        germany: { ilCode: "IL.0,7", inCode: "IN96" },
+        france: { ilCode: "IL.0,6", inCode: "IN86" },
+        brazil: { ilCode: "IL.0,6", inCode: "IN43" },
+        japan: { ilCode: "IL.0,5", inCode: "IN123" },
+        "south-africa": { ilCode: "IL.0,12", inCode: "IN211" },
+
+        // Additional countries from Africa
+        egypt: { ilCode: "IL.0,5", inCode: "IN78" },
+        ghana: { ilCode: "IL.0,5", inCode: "IN90" },
+        kenya: { ilCode: "IL.0,5", inCode: "IN126" },
+        morocco: { ilCode: "IL.0,7", inCode: "IN161" },
+        algeria: { ilCode: "IL.0,7", inCode: "IN9" },
+        tunisia: { ilCode: "IL.0,7", inCode: "IN227" },
+        tanzania: { ilCode: "IL.0,8", inCode: "IN222" },
+        uganda: { ilCode: "IL.0,6", inCode: "IN231" },
+        ethiopia: { ilCode: "IL.0,8", inCode: "IN80" },
+        zimbabwe: { ilCode: "IL.0,8", inCode: "IN253" },
+        namibia: { ilCode: "IL.0,7", inCode: "IN167" },
+        botswana: { ilCode: "IL.0,8", inCode: "IN42" },
+        rwanda: { ilCode: "IL.0,6", inCode: "IN198" },
+
+        // Middle East
+        "united-arab-emirates": { ilCode: "IL.0,20", inCode: "IN232" },
+        "saudi-arabia": { ilCode: "IL.0,12", inCode: "IN207" },
+        qatar: { ilCode: "IL.0,5", inCode: "IN187" },
+        israel: { ilCode: "IL.0,6", inCode: "IN119" },
+        turkey: { ilCode: "IL.0,6", inCode: "IN228" },
+        lebanon: { ilCode: "IL.0,7", inCode: "IN132" },
+        jordan: { ilCode: "IL.0,6", inCode: "IN124" },
+
+        // Europe
+        spain: { ilCode: "IL.0,5", inCode: "IN219" },
+        italy: { ilCode: "IL.0,5", inCode: "IN120" },
+        netherlands: { ilCode: "IL.0,11", inCode: "IN171" },
+        sweden: { ilCode: "IL.0,6", inCode: "IN220" },
+        switzerland: { ilCode: "IL.0,11", inCode: "IN221" },
+        belgium: { ilCode: "IL.0,7", inCode: "IN25" },
+        ireland: { ilCode: "IL.0,7", inCode: "IN118" },
+        poland: { ilCode: "IL.0,6", inCode: "IN193" },
+        norway: { ilCode: "IL.0,6", inCode: "IN164" },
+        denmark: { ilCode: "IL.0,7", inCode: "IN63" },
+        finland: { ilCode: "IL.0,7", inCode: "IN83" },
+        austria: { ilCode: "IL.0,7", inCode: "IN15" },
+        portugal: { ilCode: "IL.0,8", inCode: "IN186" },
+        greece: { ilCode: "IL.0,6", inCode: "IN97" },
+        "czech-republic": { ilCode: "IL.0,14", inCode: "IN61" },
+        romania: { ilCode: "IL.0,7", inCode: "IN196" },
+        hungary: { ilCode: "IL.0,7", inCode: "IN108" },
+
+        // Asia Pacific
+        singapore: { ilCode: "IL.0,9", inCode: "IN217" },
+        "hong-kong": { ilCode: "IL.0,9", inCode: "IN107" },
+        malaysia: { ilCode: "IL.0,8", inCode: "IN150" },
+        philippines: { ilCode: "IL.0,11", inCode: "IN192" },
+        thailand: { ilCode: "IL.0,8", inCode: "IN224" },
+        indonesia: { ilCode: "IL.0,9", inCode: "IN113" },
+        vietnam: { ilCode: "IL.0,7", inCode: "IN248" },
+        "new-zealand": { ilCode: "IL.0,11", inCode: "IN172" },
+        taiwan: { ilCode: "IL.0,6", inCode: "IN223" },
+        "south-korea": { ilCode: "IL.0,11", inCode: "IN134" },
+        china: { ilCode: "IL.0,5", inCode: "IN48" },
+        pakistan: { ilCode: "IL.0,8", inCode: "IN179" },
+        bangladesh: { ilCode: "IL.0,10", inCode: "IN21" },
+
+        // Latin America
+        mexico: { ilCode: "IL.0,6", inCode: "IN155" },
+        argentina: { ilCode: "IL.0,9", inCode: "IN12" },
+        chile: { ilCode: "IL.0,5", inCode: "IN47" },
+        colombia: { ilCode: "IL.0,8", inCode: "IN52" },
+        peru: { ilCode: "IL.0,4", inCode: "IN184" },
+        venezuela: { ilCode: "IL.0,9", inCode: "IN244" },
+        "costa-rica": { ilCode: "IL.0,10", inCode: "IN56" },
+        panama: { ilCode: "IL.0,6", inCode: "IN180" },
+        ecuador: { ilCode: "IL.0,7", inCode: "IN72" },
+        uruguay: { ilCode: "IL.0,7", inCode: "IN237" },
+
+        // North America - additional
+        "puerto-rico": { ilCode: "IL.0,11", inCode: "IN188" },
+        jamaica: { ilCode: "IL.0,7", inCode: "IN121" },
+
+        // Default fallback to Nigeria if country not found
+        default: { ilCode: "IL.0,7", inCode: "IN177" },
+      };
+
+      // Logging for debugging in production
+      console.log(
+        `[JobApplicator] Looking up country mapping for: "${country}"`
+      );
+
+      // Return the mapping for the requested country or use default fallback
+      return countryMappings[country] || countryMappings["default"];
+    } catch (error) {
+      console.error("[JobApplicator] Error getting country mapping:", error);
+      // Default to Nigeria in case of any error
+      return { ilCode: "IL.0,7", inCode: "IN177" };
+    }
+  },
+
+  mapJobTypeToIndeed(type) {
+    const mapping = {
+      "Full-time": "0kf:attr(CF3CP);",
+      "Part-time": "0kf:attr(75GKK);",
+      Contract: "0kf:attr(NJXCK);",
+      Temporary: "0kf:attr(4HKF7);",
+      Internship: "0kf:attr(VDTG7);",
+      "New Grad": "0kf:attr(7EQCZ);",
+      Permanent: "0kf:attr(5QWDV);",
+      All: "0kf:attr(5QWDV|75GKK|7EQCZ|CF3CP|NJXCK|VDTG7%2COR);",
+    };
+    return mapping[type] || "";
+  },
+
+  // Reset state in case of failure
+  resetState() {
+    this.state = {
+      started: false,
+      platform: "",
+      windowId: null,
+      searchTabId: null,
+      submittedLinks: [],
+      profile: null,
+      session: null,
+      jobsLimit: 10,
+      devMode: false,
+      startTime: null,
+    };
+  },
+
+  // Categorize error for better client handling
+  categorizeError(error) {
+    if (error.message.includes("fetch")) return "NETWORK_ERROR";
+    if (error.message.includes("create browser window")) return "BROWSER_ERROR";
+    if (error.message.includes("User ID is required"))
+      return "VALIDATION_ERROR";
+    if (error.message.includes("timed out")) return "TIMEOUT_ERROR";
+    return "UNKNOWN_ERROR";
+  },
+
+  // Start monitoring process
+  startMonitoring() {
+    this.monitoringInterval = setInterval(() => {
+      // Check if process has been running too long (e.g., 30 minutes)
+      const runningTime = Date.now() - this.state.startTime;
+      if (runningTime > 30 * 60 * 1000) {
+        console.warn(
+          "[JobApplicator] Job search process running for too long, stopping"
+        );
+        this.stopProcess();
+      }
+
+      // Add additional monitoring logic as needed
+    }, 60000); // Check every minute
+  },
+
+  // Handle window close event
+  handleWindowClose(windowId) {
+    if (windowId === this.state.windowId) {
+      console.log("[JobApplicator] Search window closed, stopping process");
+      this.stopProcess();
+    }
+  },
+
+  // Stop the process
+  stopProcess() {
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+    }
+
+    this.resetState();
+
+    // Notify any listeners that the process has stopped
+    if (this.onProcessStopped) {
+      this.onProcessStopped();
+    }
+  },
   /**
    * Handle getProfileData message
    */
@@ -784,7 +1298,7 @@ const RecruiteeJobApplyManager = {
         userId,
         this.state.session?.apiKey,
         this.state.jobsLimit,
-        "recruitee",
+        this.state.platform || "indeed",
         this.state.serverBaseUrl,
         this.state.devMode
       );
@@ -825,6 +1339,15 @@ const RecruiteeJobApplyManager = {
       this.state.applicationUrl = request.url;
       this.state.applicationStartTime = Date.now();
 
+      // Update platform based on URL if not set
+      if (!this.state.platform) {
+        if (request.url.includes("indeed.com")) {
+          this.state.platform = "indeed";
+        } else if (request.url.includes("glassdoor.com")) {
+          this.state.platform = "glassdoor";
+        }
+      }
+
       // Create tab
       const tab = await chrome.tabs.create({
         url: request.url,
@@ -836,6 +1359,7 @@ const RecruiteeJobApplyManager = {
       sendResponse({
         success: true,
         tabId: tab.id,
+        platform: this.state.platform,
       });
     } catch (error) {
       // Reset state on error
@@ -857,12 +1381,25 @@ const RecruiteeJobApplyManager = {
       // Extract URL from request or sender
       const url = request.url || sender.tab.url;
 
+      // Determine platform from URL if not already set
+      if (!this.state.platform) {
+        if (
+          url.includes("indeed.com") ||
+          url.includes("smartapply.indeed.com")
+        ) {
+          this.state.platform = "indeed";
+        } else if (url.includes("glassdoor.com")) {
+          this.state.platform = "glassdoor";
+        }
+      }
+
       // Add to submitted links
       this.state.submittedLinks.push({
         url,
         details: request.data || null,
         status: "SUCCESS",
         timestamp: Date.now(),
+        platform: this.state.platform,
       });
 
       // Track job application and send to API
@@ -889,7 +1426,7 @@ const RecruiteeJobApplyManager = {
               body: JSON.stringify({
                 ...request.data,
                 userId,
-                applicationPlatform: "Recruitee",
+                applicationPlatform: this.state.platform || "indeed",
               }),
             })
           );
@@ -954,12 +1491,25 @@ const RecruiteeJobApplyManager = {
       // Extract URL from request or sender
       const url = request.url || sender.tab.url;
 
+      // Determine platform from URL if not already set
+      if (!this.state.platform) {
+        if (
+          url.includes("indeed.com") ||
+          url.includes("smartapply.indeed.com")
+        ) {
+          this.state.platform = "indeed";
+        } else if (url.includes("glassdoor.com")) {
+          this.state.platform = "glassdoor";
+        }
+      }
+
       // Add to submitted links
       this.state.submittedLinks.push({
         url,
         error: request.message,
         status: "ERROR",
         timestamp: Date.now(),
+        platform: this.state.platform,
       });
 
       // Close the tab
@@ -1007,12 +1557,25 @@ const RecruiteeJobApplyManager = {
       // Extract URL from request or sender
       const url = request.url || sender.tab.url;
 
+      // Determine platform from URL if not already set
+      if (!this.state.platform) {
+        if (
+          url.includes("indeed.com") ||
+          url.includes("smartapply.indeed.com")
+        ) {
+          this.state.platform = "indeed";
+        } else if (url.includes("glassdoor.com")) {
+          this.state.platform = "glassdoor";
+        }
+      }
+
       // Add to submitted links
       this.state.submittedLinks.push({
         url,
         reason: request.message,
         status: "SKIPPED",
         timestamp: Date.now(),
+        platform: this.state.platform,
       });
 
       // Close the tab
@@ -1079,6 +1642,43 @@ const RecruiteeJobApplyManager = {
       // Reset application state
       this.resetApplicationState();
 
+      // Keep platform but reset other state
+      const platform = this.state.platform;
+
+      // Reset state but keep platform
+      this.state = {
+        // Session data
+        userId: null,
+        profile: null,
+        session: null,
+        devMode: false,
+        serverBaseUrl: HOST,
+        avatarUrl: "",
+
+        // Window and tab tracking
+        windowId: null,
+        searchTabId: null,
+        applyTabId: null,
+
+        // Application state
+        started: false,
+        applicationInProgress: false,
+        applicationUrl: null,
+        applicationStartTime: null,
+
+        // Job search parameters
+        jobsLimit: 100,
+        jobsApplied: 0,
+        searchDomain: ["indeed.com", "glassdoor.com"],
+        submittedLinks: [],
+
+        // Platform
+        platform: platform,
+
+        // Last activity timestamp for health check
+        lastActivity: Date.now(),
+      };
+
       console.log("State has been reset");
     } catch (error) {
       console.error("Error resetting state:", error);
@@ -1109,6 +1709,7 @@ const RecruiteeJobApplyManager = {
             status: "ERROR",
             error: "Tab was closed before completion",
             timestamp: Date.now(),
+            platform: this.state.platform,
           });
         }
 
@@ -1142,7 +1743,7 @@ const RecruiteeJobApplyManager = {
         chrome.notifications.create({
           type: "basic",
           iconUrl: "icon.png",
-          title: "Recruitee Job Search Completed",
+          title: `${this.state.platform} Job Search Completed`,
           message: `Successfully completed ${this.state.jobsApplied} applications.`,
         });
       } catch (error) {
@@ -1213,7 +1814,7 @@ const RecruiteeJobApplyManager = {
   },
 
   /**
-   * Handle port messages
+   * Modified handlePortMessage to handle the new requestId field
    */
   handlePortMessage(message, port) {
     try {
@@ -1221,7 +1822,12 @@ const RecruiteeJobApplyManager = {
       this.state.lastActivity = Date.now();
 
       // Extract message type, data, and requestId
-      const { type, data, requestId } = message || {};
+      const { type, data, requestId, platform } = message || {};
+
+      // Update platform if provided in message
+      if (platform) {
+        this.state.platform = platform;
+      }
 
       if (!type) {
         this.sendPortResponse(port, {
@@ -1237,6 +1843,7 @@ const RecruiteeJobApplyManager = {
           break;
 
         case "GET_PROFILE_DATA":
+          // Fix: data.url instead of message.url
           this.handleGetProfileData(data?.url, port);
           break;
 
@@ -1297,7 +1904,7 @@ const RecruiteeJobApplyManager = {
   },
 
   /**
-   * Handle application status check
+   * Modified handleCheckApplicationStatus to include requestId for response correlation
    */
   handleCheckApplicationStatus(port, requestId) {
     this.sendPortResponse(port, {
@@ -1307,6 +1914,7 @@ const RecruiteeJobApplyManager = {
         inProgress: this.state.applicationInProgress,
         url: this.state.applicationUrl,
         tabId: this.state.applyTabId,
+        platform: this.state.platform,
       },
     });
 
@@ -1320,6 +1928,7 @@ const RecruiteeJobApplyManager = {
             inProgress: this.state.applicationInProgress,
             url: this.state.applicationUrl,
             tabId: this.state.applyTabId,
+            platform: this.state.platform,
           },
         });
       } catch (error) {
@@ -1340,8 +1949,8 @@ const RecruiteeJobApplyManager = {
       // Try to extract from port name
       if (port && port.name) {
         const parts = port.name.split("-");
-        if (parts.length >= 3 && !isNaN(parseInt(parts[2]))) {
-          return parseInt(parts[2]);
+        if (parts.length >= 3 && !isNaN(parseInt(parts[parts.length - 1]))) {
+          return parseInt(parts[parts.length - 1]);
         }
       }
 
@@ -1353,7 +1962,7 @@ const RecruiteeJobApplyManager = {
   },
 
   /**
-   * Handle start application request
+   * Modified handleStartApplication with improved error handling and duplicate detection
    */
   async handleStartApplication(data, port, requestId) {
     try {
@@ -1361,7 +1970,7 @@ const RecruiteeJobApplyManager = {
       if (this.state.applicationInProgress) {
         console.log("Already have an active application, ignoring new request");
 
-        // Send response for the specific request
+        // Send response message for the specific request
         if (requestId && this.getTabIdFromPort(port)) {
           chrome.tabs.sendMessage(this.getTabIdFromPort(port), {
             type: "APPLICATION_START_RESPONSE",
@@ -1403,6 +2012,18 @@ const RecruiteeJobApplyManager = {
         return;
       }
 
+      // Determine platform from URL if not already set
+      if (!this.state.platform) {
+        if (url.includes("indeed.com")) {
+          this.state.platform = "indeed";
+        } else if (url.includes("glassdoor.com")) {
+          this.state.platform = "glassdoor";
+        } else {
+          // Default to indeed if can't determine
+          this.state.platform = "indeed";
+        }
+      }
+
       // Set state before proceeding
       this.state.applicationInProgress = true;
       this.state.applicationUrl = url;
@@ -1413,6 +2034,7 @@ const RecruiteeJobApplyManager = {
         url,
         status: "PROCESSING",
         timestamp: Date.now(),
+        platform: this.state.platform,
       });
 
       // Acknowledge the request
@@ -1487,4 +2109,6 @@ const RecruiteeJobApplyManager = {
   },
 };
 
-export { RecruiteeJobApplyManager };
+export { JobApplyManager };
+
+

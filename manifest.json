@@ -1,14 +1,16 @@
 {
     "manifest_version": 3,
     "name": "FastApply - Free AI Automated Job Application Copilot",
-    "version": "1.9",
-   "permissions": [
+    "version": "2.0",
+    "permissions": [
         "activeTab",
         "storage",
         "scripting",
         "tabs",
         "alarms",
-        "power"
+        "power",
+        "webNavigation",
+        "webRequest"
     ],
     "background": {
         "type": "module",
@@ -27,10 +29,26 @@
     "content_scripts": [
         {
             "matches": [
-                "https://*.indeed.com/*"
+                "<all_urls>"
             ],
             "js": [
-                "indeed/content.bundle.js"
+                "external/content.bundle.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://*.indeed.com/*",
+                "https://smartapply.indeed.com/*",
+                "https://*.glassdoor.com/*",
+                "https://*.glassdoor.fr/*",
+                "https://*.glassdoor.co.uk/*",
+                "https://*.glassdoor.de/*",
+                "https://*.glassdoor.ca/*",
+                "https://*.glassdoor.in/*"
+            ],
+            "js": [
+                "indeed_glassdoor/content.bundle.js"
             ],
             "run_at": "document_idle"
         },
@@ -45,17 +63,8 @@
         },
         {
             "matches": [
-                "https://*.glassdoor.com/*"
-            ],
-            "js": [
-                "glassdoor/content.bundle.js"
-            ],
-            "run_at": "document_idle"
-        },
-        {
-            "matches": [
                 "https://*.lever.co/*",
-                "https://www.google.com/search*"
+                "*://www.google.com/search?*lever*"
             ],
             "js": [
                 "lever/content.bundle.js"
@@ -64,8 +73,8 @@
         },
         {
             "matches": [
-                "https://*.workable.com/*",
-                "https://apply.workable.com/*"
+                "*://www.google.com/search?*workable*",
+                "*://*.workable.com/*"
             ],
             "js": [
                 "workable/content.bundle.js"
@@ -74,19 +83,36 @@
         },
         {
             "matches": [
-                "https://*.monster.com/*"
+                "*://www.google.com/search?*breezy*",
+                "*://*.breezy.hr/*",
+                "*://app.breezy.hr/*"
             ],
             "js": [
-                "monster/content.bundle.js"
+                "breezy/content.bundle.js"
             ],
             "run_at": "document_idle"
         },
         {
             "matches": [
-                "https://*.recruitee.com/*"
+                "*://www.google.com/search?*recruitee*",
+                "https://*.recruitee.com/*",
+                "*://*.recruitee.hr/*"
             ],
             "js": [
                 "recruitee/content.bundle.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://*.ziprecruiter.com/jobs-search*",
+                "https://*.ziprecruiter.com/jobs/*",
+                "https://*.ziprecruiter.com/job/*",
+                "https://*.ziprecruiter.com/apply/*",
+                "https://*.ziprecruiter.com/jz/*"
+            ],
+            "js": [
+                "ziprecruiter/content.bundle.js"
             ],
             "run_at": "document_idle"
         }
@@ -99,6 +125,11 @@
         "790": "icons/logo.png"
     },
     "host_permissions": [
-        "https://*.2captcha.com/*"
+        "https://*.2captcha.com/*",
+        "*://*.google.com/*",
+        "*://*.workable.com/*",
+        "*://*.ziprecruiter.com/*",
+        "http://*/*",
+        "https://*/*"
     ]
 }

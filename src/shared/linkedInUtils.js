@@ -1,7 +1,6 @@
 import { HOST, BASE_URL } from "./constants";
 import { StatusNotificationManager, resumeLoader } from "./utils";
-//Error extracting job description:
-//userDetails
+
 export class LinkedInJobParser {
   constructor() {
     this.targetClass = "jobs-description--reformatted";
@@ -420,11 +419,11 @@ export class FileHandler {
   }
 }
 
-//Resume upload failed through all methods
 /**
  * LeverFileHandler - Specialized file handling for Lever job applications
  * Handles resume uploads in Lever application forms
  */
+
 class LeverFileHandler {
   constructor(statusManager) {
     this.statusManager = statusManager || {
@@ -456,7 +455,6 @@ class LeverFileHandler {
    * @param {Element} formElement - The form element containing file inputs
    */
   async handleResumeUpload(profile, formElement) {
-    console.log("USER PROFILE", profile);
     try {
       // Find all file input fields in the form
       const fileInputs = formElement.querySelectorAll('input[type="file"]');
@@ -475,25 +473,31 @@ class LeverFileHandler {
         const labelText = (
           container.querySelector("label")?.textContent || ""
         ).toLowerCase();
-
-        console.log(this.isResumeField(labelText, container));
+        console.log(container, labelText);
+        console.log(
+          "IS THIS A RESUME FIELD",
+          this.isResumeField(labelText, container)
+        );
         // Check if this is a resume upload field
         if (this.isResumeField(labelText, container)) {
           this.statusManager.show("Uploading resume...", "info");
 
-          const resumeUrl = profile.cv?.url || profile.resumeUrl;
+          const resumeUrl = profile.cv?.url;
 
           if (!resumeUrl) {
             this.statusManager.show("No resume URL found in profile", "error");
             continue;
           }
 
-          const success = await this.uploadFileFromUrl(fileInput, resumeUrl);
+          const success = await this.uploadFileFromUrl(
+            fileInput,
+            resumeUrl,
+            profile
+          );
           if (success) {
             this.statusManager.show("Resume uploaded successfully", "success");
             uploadSuccess = true;
           } else {
-            console.log("Using fallback");
             // Try fallback method if primary method fails
             const fallbackSuccess = await this.fallbackResumeUpload(
               fileInput,
@@ -509,27 +513,82 @@ class LeverFileHandler {
             }
           }
         }
-        // Check if this is a cover letter upload field and we have one
-        // else if (
-        //   this.isCoverLetterField(labelText, container) &&
-        //   profile.coverLetter
-        // ) {
-        //   this.statusManager.show("Uploading cover letter...", "info");
+      }
 
-        //   // If we have a cover letter URL, use it, otherwise create a text file
-        //   if (profile.coverLetterUrl) {
-        //     await this.uploadFileFromUrl(
-        //       fileInput,
-        //       profile.coverLetterUrl,
-        //       profile
-        //     );
-        //   } else if (profile.coverLetter) {
-        //     await this.createAndUploadTextFile(
-        //       fileInput,
-        //       profile.coverLetter,
-        //       `${profile.firstName}_${profile.lastName}_Cover_Letter.txt`
-        //     );
-        //   }
+      return uploadSuccess;
+    } catch (error) {
+      console.error("Error in handleResumeUpload:", error);
+      this.statusManager.show(
+        `Resume upload failed: ${error.message}`,
+        "error"
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Handle file upload for Lever application forms
+   * @param {Object} profile - User profile with resume URL
+   * @param {Element} formElement - The form element containing file inputs
+   */
+  async handleLeverResumeUpload(profile, formElement) {
+    try {
+      // Find all file input fields in the form
+      const fileInputs = formElement.querySelectorAll('input[type="file"]');
+      if (!fileInputs || fileInputs.length === 0) {
+        console.log("No file inputs found in the form");
+        return false;
+      }
+
+      let uploadSuccess = false;
+
+      // Try to identify resume upload field
+      for (const fileInput of fileInputs) {
+        // Look at surrounding elements to determine the purpose of this upload field
+        const container =
+          fileInput.closest(".application-field") || fileInput.parentElement;
+        const labelText = (
+          container.querySelector("label")?.textContent || ""
+        ).toLowerCase();
+        console.log(container, labelText);
+        console.log(
+          "IS THIS A RESUME FIELD",
+          this.isResumeField(labelText, container)
+        );
+        // Check if this is a resume upload field
+        // if (this.isResumeField(labelText, container)) {
+        //   this.statusManager.show("Uploading resume...", "info");
+
+        const resumeUrl = profile.cv?.url;
+
+        if (!resumeUrl) {
+          this.statusManager.show("No resume URL found in profile", "error");
+          continue;
+        }
+
+        const success = await this.uploadFileFromUrl(
+          fileInput,
+          resumeUrl,
+          profile
+        );
+        if (success) {
+          this.statusManager.show("Resume uploaded successfully", "success");
+          uploadSuccess = true;
+        } else {
+          // Try fallback method if primary method fails
+          const fallbackSuccess = await this.fallbackResumeUpload(
+            fileInput,
+            resumeUrl,
+            profile
+          );
+          if (fallbackSuccess) {
+            this.statusManager.show(
+              "Resume uploaded successfully via fallback",
+              "success"
+            );
+            uploadSuccess = true;
+          }
+        }
         // }
       }
 
@@ -565,9 +624,9 @@ class LeverFileHandler {
       const blob = await response.blob();
 
       // Create a proper filename
-      const userName =
-        userDetails.name ||
-        `${userDetails.firstName || ""} ${userDetails.lastName || ""}`.trim();
+      const userName = `${userDetails.firstName || ""} ${
+        userDetails.lastName || ""
+      }`.trim();
       let filename = `${userName
         .toLowerCase()
         .replace(/\s+/g, "_")}_resume.pdf`;
@@ -691,6 +750,8 @@ class LeverFileHandler {
     // First apply case insensitive check for safety
     const lowerLabelText = (labelText || "").toLowerCase();
 
+    console.log("lowerLabelText:", lowerLabelText);
+
     // Check for keywords in the label text
     const keywords = [
       "resume",
@@ -698,6 +759,8 @@ class LeverFileHandler {
       "curriculum vitae",
       "upload your resume",
       "resume/cv",
+      "cresume",
+      "candidate.cv",
     ];
     if (keywords.some((keyword) => lowerLabelText.includes(keyword))) {
       return true;
@@ -711,8 +774,10 @@ class LeverFileHandler {
     if (fileInput) {
       // Check for resume indicators in the input
       if (
-        fileInput.name?.toLowerCase() === "resume" ||
-        fileInput.id?.toLowerCase().includes("resume") ||
+        ["resume", "cv", "file"].some((keyword) =>
+          fileInput.name?.toLowerCase().includes(keyword)
+        ) ||
+        fileInput.id?.toLowerCase().includes(["resume", "candidate.cv"]) ||
         fileInput.getAttribute("data-qa")?.toLowerCase().includes("resume") ||
         (fileInput.className &&
           fileInput.className.toLowerCase().includes("resume"))
@@ -896,4 +961,288 @@ class LeverFileHandler {
   }
 }
 
-export { LeverFileHandler };
+class WorkableFileHandler extends LeverFileHandler {
+  /**
+   * Finds file upload elements in a Lever form and extracts their information
+   *
+   * @param {HTMLElement} formElement - The Lever application form
+   * @returns {Array<Object>} - Array of upload field objects with element, label, and container information
+   */
+  findLeverUploadFields(formElement) {
+    try {
+      const uploadFields = [];
+
+      // Method 1: Find elements with data-role="dropzone" attribute (Lever's standard)
+      const dropzones = formElement.querySelectorAll('[data-role="dropzone"]');
+      for (const dropzone of dropzones) {
+        // Find the associated file input
+        const fileInput = dropzone.querySelector('input[type="file"]');
+        if (!fileInput) continue;
+
+        // Find the parent container that holds the entire field structure
+        const fieldContainer = this.findFieldContainer(dropzone);
+
+        // Extract the label text from the container
+        const label = this.extractLeverFieldLabel(fieldContainer);
+
+        uploadFields.push({
+          element: fileInput,
+          dropzone: dropzone,
+          container: fieldContainer,
+          label: label,
+          required:
+            fileInput.hasAttribute("required") ||
+            fileInput.getAttribute("aria-required") === "true",
+          isResume: this.isResumeField(label, fieldContainer),
+        });
+      }
+
+      // Method 2: Find all file inputs directly (backup method)
+      const fileInputs = formElement.querySelectorAll('input[type="file"]');
+      for (const fileInput of fileInputs) {
+        // Skip if we already found this input through a dropzone
+        if (uploadFields.some((field) => field.element === fileInput)) continue;
+
+        // Find the parent container
+        const fieldContainer = this.findFieldContainer(fileInput);
+
+        // Extract the label
+        const label = this.extractLeverFieldLabel(fieldContainer);
+
+        uploadFields.push({
+          element: fileInput,
+          dropzone: fileInput.closest('[data-role="dropzone"]'),
+          container: fieldContainer,
+          label: label,
+          required:
+            fileInput.hasAttribute("required") ||
+            fileInput.getAttribute("aria-required") === "true",
+          isResume: this.isResumeField(label, fieldContainer),
+        });
+      }
+
+      return uploadFields;
+    } catch (error) {
+      console.error("Error finding Lever upload fields:", error);
+      return [];
+    }
+  }
+
+  /**
+   * Find the field container for a Lever form element
+   *
+   * @param {HTMLElement} element - The element to find the container for
+   * @returns {HTMLElement|null} - The container element or null if not found
+   */
+  findFieldContainer(element) {
+    // Start with the element itself
+    let current = element;
+
+    // Go up the DOM tree looking for the container (max 5 levels)
+    for (let i = 0; i < 5 && current; i++) {
+      // Check if this is a field container (Lever uses the styles--3aPac class)
+      if (
+        current.classList.contains("styles--3aPac") ||
+        current.className.includes("styles--3aPac")
+      ) {
+        return current;
+      }
+
+      // Move up to parent
+      current = current.parentElement;
+    }
+
+    // If no specific container found, return the closest div
+    return element.closest("div");
+  }
+
+  /**
+   * Extract the label text from a Lever field container
+   *
+   * @param {HTMLElement} container - The field container
+   * @returns {string} - The extracted label text
+   */
+  extractLeverFieldLabel(container) {
+    if (!container) return "";
+
+    // Method 1: Look for the label element with styles--QTMDv class
+    const labelEl = container.querySelector('.styles--QTMDv, [class*="QTMDv"]');
+    if (labelEl) {
+      return labelEl.textContent.trim();
+    }
+
+    // Method 2: Look for a label with id ending with "_label"
+    const labelWithIdPattern = container.querySelector('span[id$="_label"]');
+    if (labelWithIdPattern) {
+      return labelWithIdPattern.textContent.trim();
+    }
+
+    // Method 3: Look for aria-labelledby references
+    const fileInput = container.querySelector('input[type="file"]');
+    if (fileInput) {
+      const labelledById = fileInput.getAttribute("aria-labelledby");
+      if (labelledById) {
+        const labelEl = document.getElementById(labelledById);
+        if (labelEl) {
+          return labelEl.textContent.trim();
+        }
+      }
+    }
+
+    // Method 4: Just get the text content excluding the dropzone
+    // Clone the container to avoid modifying the original
+    const clone = container.cloneNode(true);
+
+    // Remove the dropzone and input elements from the clone
+    const elementsToRemove = clone.querySelectorAll(
+      '[data-role="dropzone"], input[type="file"]'
+    );
+    for (const el of elementsToRemove) {
+      el.parentNode.removeChild(el);
+    }
+
+    // Extract text from what remains, looking for anything that might be a label
+    const possibleLabelElements = clone.querySelectorAll(
+      "label, span, strong, div"
+    );
+    for (const el of possibleLabelElements) {
+      const text = el.textContent.trim();
+      if (text && text.length < 50) {
+        // Reasonable label length
+        return text;
+      }
+    }
+
+    // Last resort: return any text from the container
+    return clone.textContent.trim();
+  }
+
+  /**
+   * Check if a field is for resume uploads based on label text and container context
+   *
+   * @param {string} labelText - The label text
+   * @param {HTMLElement} container - The field container element
+   * @returns {boolean} - True if this is a resume field
+   */
+  isResumeField(labelText, container) {
+    if (!labelText) return false;
+
+    // Clean up label text
+    const cleanedLabel = labelText
+      .toLowerCase()
+      .replace(/\*|\s+|required/g, " ")
+      .trim();
+
+    // Check for resume-related keywords
+    const resumeKeywords = [
+      "resume",
+      "cv",
+      "curriculum",
+      "curriculum vitae",
+      "upload resume",
+      "upload cv",
+      "attach resume",
+      "attach cv",
+    ];
+
+    // Direct match with resume keywords
+    if (resumeKeywords.some((keyword) => cleanedLabel.includes(keyword))) {
+      return true;
+    }
+
+    // If container is provided, look for contextual clues
+    if (container) {
+      // Look at file input's accept attribute
+      const fileInput = container.querySelector('input[type="file"]');
+      if (fileInput && fileInput.hasAttribute("accept")) {
+        const acceptAttr = fileInput.getAttribute("accept");
+        // Resume uploads typically accept PDF, DOC, DOCX
+        if (acceptAttr.includes("pdf") || acceptAttr.includes("doc")) {
+          return true;
+        }
+      }
+
+      // Look for description text near the input
+      const containerText = container.textContent.toLowerCase();
+      if (resumeKeywords.some((keyword) => containerText.includes(keyword))) {
+        return true;
+      }
+    }
+
+    // If this is the only file upload field in the form, it's likely for a resume
+    const form = container?.closest("form");
+    if (form) {
+      const totalFileInputs =
+        form.querySelectorAll('input[type="file"]').length;
+      if (totalFileInputs === 1) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Bridge method to use findLeverUploadFields with handleLeverResumeUpload
+   *
+   * @param {Object} profile - User profile with resume URL
+   * @param {HTMLElement} formElement - The form element
+   * @returns {Promise<boolean>} - True if upload was successful
+   */
+  async handleFormResumeUpload(profile, formElement) {
+    try {
+      // First find all upload fields in the form
+      const uploadFields = this.findLeverUploadFields(formElement);
+
+      if (uploadFields.length === 0) {
+        console.log("No upload fields found in the form");
+        return false;
+      }
+
+      console.log(`Found ${uploadFields.length} upload fields in form`);
+
+      // Find resume upload fields
+      const resumeFields = uploadFields.filter((field) => field.isResume);
+
+      // If we found specific resume fields, use those
+      const fieldsToTry = resumeFields.length > 0 ? resumeFields : uploadFields;
+
+      // Try to upload to each field until one succeeds
+      for (const field of fieldsToTry) {
+        console.log(`Attempting upload to field: ${field.label}`);
+
+        const success = await this.handleLeverResumeUpload(
+          profile,
+          field.element
+        );
+        if (success) {
+          console.log(`Successfully uploaded resume to field: ${field.label}`);
+          return true;
+        }
+      }
+
+      console.log("Failed to upload resume to any field");
+      return false;
+    } catch (error) {
+      console.error("Error in handleFormResumeUpload:", error);
+      return false;
+    }
+  }
+}
+
+class RecruiteeFileHandler extends LeverFileHandler {}
+
+class BreezyFileHandler extends LeverFileHandler {}
+
+class IndeedFileHandler extends LeverFileHandler {}
+
+class GlassdoorFileHandler extends LeverFileHandler {}
+
+export {
+  LeverFileHandler,
+  WorkableFileHandler,
+  BreezyFileHandler,
+  RecruiteeFileHandler,
+  IndeedFileHandler,
+  GlassdoorFileHandler,
+};

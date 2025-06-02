@@ -9,8 +9,6 @@ import { HOST, PLAN_LIMITS } from "@shared/constants";
 import { FileHandler, LinkedInJobParser } from "../../shared/linkedInUtils";
 import { StatusNotificationManager } from "../../shared/utils";
 
-//
-//applications
 class LinkedInJobApply {
   constructor() {
     this.stateManager = new StateManager();
@@ -681,6 +679,7 @@ class LinkedInJobApply {
         body: JSON.stringify({
           question: normalizedLabel,
           options,
+          platform: "linkedin",
           userData: await this.getUserDetails(),
           description: LinkedInJobParser.extract("string"),
         }),
@@ -780,6 +779,7 @@ class LinkedInJobApply {
       }
     }
   }
+
   async handleSelectQuestion(select) {
     // Find parent container
     const container = select.closest(".fb-dash-form-element");
@@ -1115,6 +1115,7 @@ class LinkedInJobApply {
 
     return element.offsetParent !== null;
   }
+
   async saveAppliedJob(jobDetails) {
     try {
       const state = await this.stateManager.getState();
@@ -1148,6 +1149,7 @@ class LinkedInJobApply {
       return false;
     }
   }
+
   async updateApplicationCount(userId) {
     try {
       const response = await fetch(`${HOST}/api/applications`, {
@@ -1270,8 +1272,6 @@ class LinkedInJobApply {
     }
   }
 
-  // //TODO:
-
   async clickJobCard(jobCard) {
     try {
       const clickableElement = jobCard.querySelector(
@@ -1321,206 +1321,6 @@ class LinkedInJobApply {
       throw new Error("Job details failed to load");
     }
   }
-
-  // async processJobs({ jobsToApply }) {
-  //   let processedCount = 0;
-  //   let appliedCount = 0;
-  //   let processedJobs = new Set();
-  //   let currentPage = 1;
-  //   let noNewJobsCount = 0;
-  //   const MAX_NO_NEW_JOBS = 3;
-
-  //   try {
-  //     const state = await this.stateManager.getState();
-  //     if (!state || !state.userId) {
-  //       throw new Error("No user state found. Please restart the job search.");
-  //     }
-
-  //     this.statusManager.show(
-  //       `Starting to process jobs. Target: ${jobsToApply} jobs`,
-  //       "info"
-  //     );
-
-  //     // Initial scroll to trigger job loading
-  //     await this.initialScroll();
-
-  //     while (appliedCount < jobsToApply) {
-  //       const jobCards = await this.getJobCards();
-  //       console.log(
-  //         `Found ${jobCards.length} job cards on page ${currentPage}`
-  //       );
-
-  //       if (jobCards.length === 0) {
-  //         console.log("No job cards found, checking pagination");
-  //         const hasNextPage = await this.goToNextPage(currentPage);
-  //         if (hasNextPage) {
-  //           currentPage++;
-  //           noNewJobsCount = 0;
-  //           await this.waitForPageLoad();
-  //           continue;
-  //         } else {
-  //           console.log("No more pages available");
-  //           break;
-  //         }
-  //       }
-
-  //       let newJobsFound = false;
-
-  //       for (const jobCard of jobCards) {
-  //         if (appliedCount >= jobsToApply) {
-  //           this.statusManager.show(
-  //             `Reached target of ${jobsToApply} jobs`,
-  //             "warning"
-  //           );
-  //           break;
-  //         }
-
-  //         const jobId = this.getJobIdFromCard(jobCard);
-
-  //         if (!jobId || processedJobs.has(jobId)) {
-  //           continue;
-  //         }
-
-  //         processedJobs.add(jobId);
-  //         newJobsFound = true;
-  //         processedCount++;
-
-  //         try {
-  //           // First check if we can still apply
-  //           const currentState = await this.stateManager.getState();
-  //           if (!canApplyMore(currentState)) {
-  //             const remaining = getRemainingApplications(currentState);
-  //             this.statusManager.show(
-  //               `Cannot apply: ${
-  //                 currentState.userRole === "credit"
-  //                   ? `Insufficient credits (${currentState.credits} remaining)`
-  //                   : `Daily limit reached (${remaining} applications remaining)`
-  //               }`,
-  //               "warning"
-  //             );
-  //             return {
-  //               status: "limit_reached",
-  //               appliedCount,
-  //               processedCount,
-  //               totalPages: currentPage,
-  //             };
-  //           }
-
-  //           // Check if already applied
-  //           if (await this.checkIfAlreadyApplied(jobId, state.userId)) {
-  //             this.statusManager.show(
-  //               `Already applied to job ${jobId}, skipping.`,
-  //               "warning"
-  //             );
-  //             continue;
-  //           }
-
-  //           // Check if the job card is in view, if not, scroll to it
-  //           if (!this.isElementInViewport(jobCard)) {
-  //             jobCard.scrollIntoView({ behavior: "smooth", block: "center" });
-  //             await this.sleep(1000);
-  //           }
-
-  //           // Click and wait for job details
-  //           await this.clickJobCard(jobCard);
-  //           await this.waitForJobDetailsLoad();
-
-  //           const jobDetails = await this.getJobProperties();
-  //           this.statusManager.show(
-  //             `Processing: ${jobDetails.title} (Page ${currentPage})`,
-  //             "info"
-  //           );
-
-  //           // Find and click the Easy Apply button
-  //           const applyButton = await this.findEasyApplyButton();
-  //           if (!applyButton) {
-  //             console.log("No Easy Apply button found");
-  //             continue;
-  //           }
-
-  //           // Attempt to apply
-  //           const success = await this.applyToJob(applyButton, jobDetails);
-
-  //           if (success) {
-  //             appliedCount++;
-  //             this.statusManager.show(
-  //               `Successfully applied to job ${appliedCount}/${jobsToApply}`,
-  //               "success"
-  //             );
-
-  //             // Update application count and state
-  //             const currentState = await this.stateManager.getState();
-  //             await this.stateManager.updateState({
-  //               applicationsUsed: currentState.applicationsUsed + 1,
-  //               availableCredits:
-  //                 currentState.userRole === "free" ||
-  //                 currentState.userRole === "credit"
-  //                   ? currentState.availableCredits - 1
-  //                   : currentState.availableCredits,
-  //             });
-
-  //             await this.updateApplicationCount(state.userId);
-  //             await checkUserRole(state.userId);
-  //           }
-
-  //           await this.sleep(2000);
-  //         } catch (error) {
-  //           this.statusManager.show(
-  //             `Error processing job ${jobId} on page ${currentPage}`,
-  //             "error"
-  //           );
-  //           console.error(`Error processing job ${jobId}:`, error);
-  //           continue;
-  //         }
-  //       }
-
-  //       // If we haven't found new jobs on current page
-  //       if (!newJobsFound) {
-  //         // Try scrolling first
-  //         if (await this.scrollAndWaitForNewJobs()) {
-  //           noNewJobsCount = 0;
-  //           continue;
-  //         }
-
-  //         // If scrolling doesn't help, try next page
-  //         this.statusManager.show(
-  //           `Moving to next page (current: ${currentPage})`,
-  //           "info"
-  //         );
-  //         const hasNextPage = await this.goToNextPage(currentPage);
-  //         if (hasNextPage) {
-  //           currentPage++;
-  //           noNewJobsCount = 0;
-  //           await this.waitForPageLoad();
-  //         } else {
-  //           noNewJobsCount++;
-  //           if (noNewJobsCount >= MAX_NO_NEW_JOBS) {
-  //             this.statusManager.show(
-  //               "No more jobs available after multiple attempts",
-  //               "warning"
-  //             );
-  //             break;
-  //           }
-  //         }
-  //       }
-  //     }
-
-  //     const message = `Finished processing jobs. Applied to ${appliedCount}/${jobsToApply} jobs (Processed ${processedCount} total across ${currentPage} pages)`;
-  //     this.statusManager.show(message, "success");
-
-  //     return {
-  //       status: "completed",
-  //       message,
-  //       appliedCount,
-  //       processedCount,
-  //       totalPages: currentPage,
-  //     };
-  //   } catch (error) {
-  //     console.error("Error in processJobs:", error);
-  //     this.statusManager.show("Error processing jobs", "error");
-  //     throw error;
-  //   }
-  // }
 
   async processJobs({ jobsToApply }) {
     let processedCount = 0;
@@ -1739,6 +1539,7 @@ class LinkedInJobApply {
       throw error;
     }
   }
+
   async goToNextPage(currentPage) {
     try {
       console.log(`Attempting to go to next page after page ${currentPage}`);
@@ -1902,8 +1703,6 @@ class LinkedInJobApply {
     );
   }
 }
-
-//handleFileQuestion
 
 Element.prototype.isVisible = function () {
   return (

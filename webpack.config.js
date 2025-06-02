@@ -140,13 +140,15 @@ class DebugPlugin {
 
 const platforms = [
   "indeed",
+  "indeed_glassdoor",
   "linkedin",
   "external",
   "glassdoor",
+  "ziprecruiter",
   "lever",
   "workable",
-  "monster",
-  "recruitee"
+  "breezy",
+  "recruitee",
 ];
 
 const baseAliases = {

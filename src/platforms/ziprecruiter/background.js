@@ -1,17 +1,15 @@
-// recruiteeBackground.js
 import { HOST } from "@shared/constants";
 import {
   formatUserDataForJobApplication,
   formatApplicationsToSubmittedLinks,
 } from "@shared/userDataFormatter";
 
-console.log("Recruitee Background Script Initialized");
-
+console.log("ZipRecruiter Background Script Initialized");
 /**
- * RecruiteeJobApplyManager - Background script for managing Recruitee job applications
- * Following the same robust implementation pattern as Workable with clear state management
+ * ZipRecruiterManager - Background script for managing job applications on ZipRecruiter
+ * Coordinates between search and application tabs and communicates with the server
  */
-const RecruiteeJobApplyManager = {
+const ZipRecruiterManager = {
   // State management
   state: {
     // Session data
@@ -36,7 +34,7 @@ const RecruiteeJobApplyManager = {
     // Job search parameters
     jobsLimit: 100,
     jobsApplied: 0,
-    searchDomain: ["recruitee.com"],
+    searchDomain: ["ziprecruiter.com"],
     submittedLinks: [],
 
     // Last activity timestamp for health check
@@ -47,23 +45,19 @@ const RecruiteeJobApplyManager = {
    * Initialize the manager
    */
   async init() {
-    console.log("Recruitee Job Manager initialized");
+    console.log("ZipRecruiter Manager initialized");
 
     // Set up message listeners
-    chrome.runtime.onConnect.addListener(
-      this.handleRecruiteeConnect.bind(this)
+    chrome.runtime.onConnect.addListener(this.handleConnect.bind(this));
+    chrome.runtime.onMessage.addListener(
+      this.handleZiprecruiterMessage.bind(this)
     );
-    chrome.runtime.onMessage.addListener(this.handleRecruiteeMessage.bind(this));
 
     // Set up tab removal listener
     chrome.tabs.onRemoved.addListener(this.handleTabRemoved.bind(this));
 
     // Start health check interval
     this.startHealthCheck();
-  },
-
-  create() {
-    return new RecruiteeJobApplyManager();
   },
 
   /**
@@ -164,27 +158,38 @@ const RecruiteeJobApplyManager = {
     if (!this.state.started || !this.state.session) return;
 
     try {
-      // Build search query
-      let searchQuery = `site:recruitee.com ${
-        this.state.session.role || "jobs"
-      }`;
-      if (this.state.session.country) {
-        searchQuery += ` ${this.state.session.country}`;
-      }
-      if (this.state.session.city) {
-        searchQuery += ` ${this.state.session.city}`;
-      }
-      if (this.state.session.workplace === "REMOTE") {
-        searchQuery += " Remote";
-      } else if (this.state.session.workplace === "ON_SITE") {
-        searchQuery += " On-site";
-      } else if (this.state.session.workplace === "HYBRID") {
-        searchQuery += " Hybrid";
+      // Build search URL
+      let searchUrl = "https://www.ziprecruiter.com/jobs-search";
+
+      // Add search parameters
+      const searchParams = new URLSearchParams();
+
+      if (this.state.session.role) {
+        searchParams.append("search", this.state.session.role);
       }
 
-      // Encode the search query
-      const encodedQuery = encodeURIComponent(searchQuery);
-      const searchUrl = `https://www.google.com/search?q=${encodedQuery}`;
+      if (this.state.session.location) {
+        searchParams.append("location", this.state.session.location);
+      }
+
+      // Add additional parameters to match proper ZipRecruiter URL format
+      if (this.state.session.workplace === "REMOTE") {
+        searchParams.append("refine_by_location_type", "remote");
+      } else {
+        searchParams.append("refine_by_location_type", "");
+      }
+
+      // Add standard search parameters
+      searchParams.append("radius", "25");
+      searchParams.append("days", "");
+      searchParams.append("refine_by_employment", "employment_type:all");
+      searchParams.append("refine_by_salary", "");
+      searchParams.append("refine_by_salary_ceil", "");
+
+      // Complete search URL with parameters
+      if (searchParams.toString()) {
+        searchUrl += "?" + searchParams.toString();
+      }
 
       // Create window or tab as needed
       if (this.state.windowId) {
@@ -222,7 +227,7 @@ const RecruiteeJobApplyManager = {
   /**
    * Handle connection request from content scripts
    */
-  handleRecruiteeConnect(port) {
+  handleConnect(port) {
     console.log("New connection established:", port.name);
     this.state.lastActivity = Date.now();
 
@@ -236,7 +241,7 @@ const RecruiteeJobApplyManager = {
       console.log("Port disconnected:", port.name);
     });
 
-    // Extract tab ID from port name (format: recruitee-TYPE-TABID)
+    // Extract tab ID from port name (format: ziprecruiter-TYPE-TABID)
     const portNameParts = port.name.split("-");
     if (portNameParts.length >= 3) {
       const tabId = parseInt(portNameParts[2]);
@@ -275,7 +280,7 @@ const RecruiteeJobApplyManager = {
   /**
    * Handle one-off messages (not using long-lived connections)
    */
-  handleRecruiteeMessage(request, sender, sendResponse) {
+  handleZiprecruiterMessage(request, sender, sendResponse) {
     try {
       console.log("One-off message received:", request);
       this.state.lastActivity = Date.now();
@@ -337,7 +342,7 @@ const RecruiteeJobApplyManager = {
           });
       }
     } catch (error) {
-      console.error("Error in handleRecruiteeMessage:", error);
+      console.error("Error in handleZiprecruiterMessage:", error);
       sendResponse({
         success: false,
         message: error.message,
@@ -351,6 +356,10 @@ const RecruiteeJobApplyManager = {
    * Handle GET_SEARCH_TASK message
    */
   handleGetSearchTask(port) {
+    // Define search link pattern for ZipRecruiter
+    const searchLinkPattern =
+      /^https:\/\/(www\.)?ziprecruiter\.com\/(job|jobs|jz|apply).*$/;
+
     this.sendPortResponse(port, {
       type: "SEARCH_TASK_DATA",
       data: {
@@ -358,9 +367,8 @@ const RecruiteeJobApplyManager = {
         current: this.state.jobsApplied,
         domain: this.state.searchDomain,
         submittedLinks: this.state.submittedLinks,
-        // Convert regex pattern to string if needed
-        searchLinkPattern:
-          /^https:\/\/(.*?)\.recruitee\.com\/(o|career)\/([^\/]+)\/.*$/.toString(),
+        // Convert regex pattern to string
+        searchLinkPattern: searchLinkPattern.toString(),
       },
     });
   },
@@ -400,7 +408,7 @@ const RecruiteeJobApplyManager = {
         userId,
         this.state.session?.apiKey,
         this.state.jobsLimit,
-        "recruitee",
+        "ziprecruiter",
         this.state.serverBaseUrl,
         this.state.devMode
       );
@@ -478,7 +486,7 @@ const RecruiteeJobApplyManager = {
               body: JSON.stringify({
                 ...data,
                 userId,
-                applicationPlatform: "Recruitee",
+                applicationPlatform: "ziprecruiter",
               }),
             })
           );
@@ -660,8 +668,7 @@ const RecruiteeJobApplyManager = {
       if (this.state.started) {
         sendResponse({
           status: "already_started",
-          platform: "recruitee",
-          message: "Recruitee job search already in progress",
+          message: "ZipRecruiter job search already in progress",
         });
         return;
       }
@@ -684,7 +691,7 @@ const RecruiteeJobApplyManager = {
         userId,
         request.sessionToken,
         jobsToApply,
-        "recruitee",
+        "ziprecruiter",
         HOST,
         this.state.devMode
       );
@@ -692,11 +699,12 @@ const RecruiteeJobApplyManager = {
       // Format submitted links
       const submittedLinks = formatApplicationsToSubmittedLinks(
         request.submittedLinks || [],
-        "recruitee"
+        "ziprecruiter"
       );
 
       // Update state
       this.state.submittedLinks = submittedLinks || [];
+      console.log(formattedData.session);
       this.state.profile = formattedData.profile;
       this.state.session = formattedData.session;
       this.state.avatarUrl = formattedData.avatarUrl;
@@ -704,29 +712,63 @@ const RecruiteeJobApplyManager = {
       this.state.serverBaseUrl = HOST;
       this.state.jobsLimit = jobsToApply;
 
-      // Build search query
-      let searchQuery = `site:recruitee.com ${
-        this.state.session.role || "jobs"
-      }`;
+      let searchUrl = "https://www.ziprecruiter.com/jobs-search";
+
+      // Add search parameters
+      const searchParams = new URLSearchParams();
+
+      // Add job role (search term)
+      if (this.state.session.role) {
+        searchParams.append("search", this.state.session.role);
+      }
+
+      // Add location
       if (this.state.session.country) {
-        searchQuery += ` ${this.state.session.country}`;
+        searchParams.append("location", this.state.session.country);
       }
-      if (this.state.session.city) {
-        searchQuery += ` ${this.state.session.city}`;
+      console.log(this.state.session.jobAge);
+      // Handle remote filter correctly
+      if (this.state.session.workplace) {
+        searchParams.append("refine_by_location_type", "only_remote");
+      } else {
+        searchParams.append("refine_by_location_type", ""); // For in-person jobs
+        // searchParams.append("refine_by_location_type", "no_remote"); // For in-person jobs
       }
-      if (this.state.session.workplace === "REMOTE") {
-        searchQuery += " Remote";
-      } else if (this.state.session.workplace === "ON_SITE") {
-        searchQuery += " On-site";
-      } else if (this.state.session.workplace === "HYBRID") {
-        searchQuery += " Hybrid";
+
+      // Handle date posted filter
+      if (this.state.session.jobAge) {
+        searchParams.append("days", this.state.session.jobAge);
+      } else {
+        searchParams.append("days", ""); // Any time
+      }
+
+      console.log(this.state.session.jobType);
+      const jobType = this.state.session.jobType.toLowerCase() || "all";
+      searchParams.append("refine_by_employment", `employment_type:${jobType}`);
+
+      // Handle salary filters
+      if (this.state.session.minSalary) {
+        searchParams.append("refine_by_salary", this.state.session.minSalary);
+      }
+
+      if (this.state.session.maxSalary) {
+        searchParams.append(
+          "refine_by_salary_ceil",
+          this.state.session.maxSalary
+        );
+      }
+
+      // Add standard search parameter
+      searchParams.append("radius", "25");
+
+      // Complete search URL with parameters
+      if (searchParams.toString()) {
+        searchUrl += "?" + searchParams.toString();
       }
 
       // Create search window
       const window = await chrome.windows.create({
-        url: `https://www.google.com/search?q=${encodeURIComponent(
-          searchQuery
-        )}`,
+        url: searchUrl,
         state: "maximized",
       });
 
@@ -736,15 +778,13 @@ const RecruiteeJobApplyManager = {
 
       sendResponse({
         status: "started",
-        platform: "recruitee",
-        message: "Recruitee job search process initiated",
+        message: "ZipRecruiter job search process initiated",
       });
     } catch (error) {
-      console.error("Error starting Recruitee job search:", error);
+      console.error("Error starting ZipRecruiter job search:", error);
       sendResponse({
         status: "error",
-        platform: "recruitee",
-        message: "Failed to start Recruitee job search: " + error.message,
+        message: "Failed to start ZipRecruiter job search: " + error.message,
       });
     }
   },
@@ -784,7 +824,7 @@ const RecruiteeJobApplyManager = {
         userId,
         this.state.session?.apiKey,
         this.state.jobsLimit,
-        "recruitee",
+        "ziprecruiter",
         this.state.serverBaseUrl,
         this.state.devMode
       );
@@ -851,11 +891,38 @@ const RecruiteeJobApplyManager = {
 
   /**
    * Handle applicationCompleted message
+   * Improved to handle potential port closure
    */
   async handleApplicationCompletedMessage(request, sender, sendResponse) {
     try {
       // Extract URL from request or sender
-      const url = request.url || sender.tab.url;
+      const url = request.url || sender?.tab?.url || "unknown";
+
+      // Log the receipt of the message to debug later
+      console.log("Received applicationCompleted message:", {
+        url: url,
+        sender: sender?.tab?.id || "unknown",
+        data: request.data ? { ...request.data } : null,
+      });
+
+      // Check if this is a duplicate (already processed)
+      const isDuplicate = this.state.submittedLinks.some(
+        (link) => this.isUrlMatch(link.url, url) && link.status === "SUCCESS"
+      );
+
+      if (isDuplicate) {
+        console.log("Ignoring duplicate application completion for URL:", url);
+
+        // Still send success response
+        if (sendResponse) {
+          try {
+            sendResponse({ status: "success", duplicate: true });
+          } catch (e) {
+            console.warn("Error sending response:", e);
+          }
+        }
+        return;
+      }
 
       // Add to submitted links
       this.state.submittedLinks.push({
@@ -868,56 +935,51 @@ const RecruiteeJobApplyManager = {
       // Track job application and send to API
       const userId = this.state.userId;
 
-      try {
-        const apiPromises = [];
+      const apiPromises = [];
 
-        if (userId) {
-          apiPromises.push(
-            fetch(`${this.state.serverBaseUrl}/api/applications`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ userId }),
-            })
-          );
-        }
-
-        if (request.data) {
-          apiPromises.push(
-            fetch(`${this.state.serverBaseUrl}/api/applied-jobs`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                ...request.data,
-                userId,
-                applicationPlatform: "Recruitee",
-              }),
-            })
-          );
-        }
-
-        if (apiPromises.length > 0) {
-          await Promise.all(apiPromises);
-        }
-      } catch (apiError) {
-        console.error("API error:", apiError);
+      if (userId) {
+        // Create promises but don't await them yet
+        apiPromises.push(
+          fetch(`${this.state.serverBaseUrl}/api/applications`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ userId }),
+          }).catch((e) => console.error("API applications error:", e))
+        );
       }
 
-      // Close the tab
-      try {
-        if (sender.tab?.id) {
-          await chrome.tabs.remove(sender.tab.id);
-        } else if (this.state.applyTabId) {
-          await chrome.tabs.remove(this.state.applyTabId);
-        }
-      } catch (tabError) {
-        console.error("Error closing tab:", tabError);
+      if (request.data) {
+        apiPromises.push(
+          fetch(`${this.state.serverBaseUrl}/api/applied-jobs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ...request.data,
+              userId,
+              applicationPlatform: "ziprecruiter",
+            }),
+          }).catch((e) => console.error("API applied-jobs error:", e))
+        );
       }
 
-      // Increment count
+      // Execute API calls in parallel but don't block on them
+      if (apiPromises.length > 0) {
+        Promise.all(apiPromises).catch((error) => {
+          console.error("Error in API calls:", error);
+        });
+      }
+
+      // Increment count immediately
       this.state.jobsApplied++;
 
-      // Send response
-      sendResponse({ status: "success" });
+      // Send success response if callback exists
+      if (sendResponse) {
+        try {
+          sendResponse({ status: "success" });
+        } catch (responseError) {
+          console.warn("Error sending response:", responseError);
+        }
+      }
 
       // Reset application state
       this.resetApplicationState();
@@ -932,18 +994,52 @@ const RecruiteeJobApplyManager = {
           status: "SUCCESS",
         });
       }
+
+      // Return success for async handlers
+      return true;
     } catch (error) {
       console.error("Error handling application completion message:", error);
-      sendResponse({ status: "error", message: error.message });
 
-      // Reset and continue
+      // Try to send response if possible
+      if (sendResponse) {
+        try {
+          sendResponse({ status: "error", message: error.message });
+        } catch (e) {
+          console.warn("Error sending error response:", e);
+        }
+      }
+
+      // Reset and continue anyway
       this.resetApplicationState();
       this.notifySearchNext({
-        url: request.url || sender.tab.url,
+        url: request.url || sender?.tab?.url || "unknown",
         status: "ERROR",
         message: error.message,
       });
+
+      // Return true to indicate we handled it
+      return true;
     }
+  },
+
+  /**
+   * Helper method to safely close a tab
+   */
+  async tryCloseTab(tabId) {
+    if (!tabId) return false;
+
+    try {
+      // Check if tab exists before removing
+      const tab = await chrome.tabs.get(tabId);
+      if (tab) {
+        await chrome.tabs.remove(tabId);
+        return true;
+      }
+    } catch (e) {
+      // Tab might not exist anymore, which is fine
+      console.log("Tab not found or already closed:", tabId);
+    }
+    return false;
   },
 
   /**
@@ -1079,6 +1175,37 @@ const RecruiteeJobApplyManager = {
       // Reset application state
       this.resetApplicationState();
 
+      // Reset state
+      this.state = {
+        // Session data
+        userId: null,
+        profile: null,
+        session: null,
+        devMode: false,
+        serverBaseUrl: HOST,
+        avatarUrl: "",
+
+        // Window and tab tracking
+        windowId: null,
+        searchTabId: null,
+        applyTabId: null,
+
+        // Application state
+        started: false,
+        applicationInProgress: false,
+        applicationUrl: null,
+        applicationStartTime: null,
+
+        // Job search parameters
+        jobsLimit: 100,
+        jobsApplied: 0,
+        searchDomain: ["ziprecruiter.com"],
+        submittedLinks: [],
+
+        // Last activity timestamp for health check
+        lastActivity: Date.now(),
+      };
+
       console.log("State has been reset");
     } catch (error) {
       console.error("Error resetting state:", error);
@@ -1142,7 +1269,7 @@ const RecruiteeJobApplyManager = {
         chrome.notifications.create({
           type: "basic",
           iconUrl: "icon.png",
-          title: "Recruitee Job Search Completed",
+          title: "ZipRecruiter Job Search Completed",
           message: `Successfully completed ${this.state.jobsApplied} applications.`,
         });
       } catch (error) {
@@ -1213,14 +1340,14 @@ const RecruiteeJobApplyManager = {
   },
 
   /**
-   * Handle port messages
+   * Handle port message
    */
   handlePortMessage(message, port) {
     try {
       console.log("Port message received:", message);
       this.state.lastActivity = Date.now();
 
-      // Extract message type, data, and requestId
+      // Extract message type and data
       const { type, data, requestId } = message || {};
 
       if (!type) {
@@ -1297,7 +1424,7 @@ const RecruiteeJobApplyManager = {
   },
 
   /**
-   * Handle application status check
+   * Handle check application status
    */
   handleCheckApplicationStatus(port, requestId) {
     this.sendPortResponse(port, {
@@ -1340,8 +1467,8 @@ const RecruiteeJobApplyManager = {
       // Try to extract from port name
       if (port && port.name) {
         const parts = port.name.split("-");
-        if (parts.length >= 3 && !isNaN(parseInt(parts[2]))) {
-          return parseInt(parts[2]);
+        if (parts.length >= 3 && !isNaN(parseInt(parts[parts.length - 1]))) {
+          return parseInt(parts[parts.length - 1]);
         }
       }
 
@@ -1353,7 +1480,7 @@ const RecruiteeJobApplyManager = {
   },
 
   /**
-   * Handle start application request
+   * Handle start application
    */
   async handleStartApplication(data, port, requestId) {
     try {
@@ -1361,7 +1488,7 @@ const RecruiteeJobApplyManager = {
       if (this.state.applicationInProgress) {
         console.log("Already have an active application, ignoring new request");
 
-        // Send response for the specific request
+        // Send response message for the specific request
         if (requestId && this.getTabIdFromPort(port)) {
           chrome.tabs.sendMessage(this.getTabIdFromPort(port), {
             type: "APPLICATION_START_RESPONSE",
@@ -1487,4 +1614,4 @@ const RecruiteeJobApplyManager = {
   },
 };
 
-export { RecruiteeJobApplyManager };
+export { ZipRecruiterManager };

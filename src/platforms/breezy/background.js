@@ -6,11 +6,12 @@ import {
 
 console.log("Background Script Initialized");
 
+//Tab not responding timeout
 /**
- * LeverJobApplyManager - Background script for managing Lever job applications
- * Complete robust implementation with all event handlers and error recovery
+ * BreezyJobApplyManager - Background script for managing Breezy job applications
+ * Complete implementation with event handlers and error recovery
  */
-const LeverJobApplyManager = {
+const BreezyJobApplyManager = {
   // Tab and window tracking
   windowId: null,
 
@@ -53,25 +54,28 @@ const LeverJobApplyManager = {
     started: false,
     submittedLinks: [],
     platformsFlow: [],
+    applyTabOpened: null,
+    searchTabTimestamp: Date.now(),
+    applyTabTimestamp: null,
+    windowTimestamp: null,
+    isProcessingJob: false,
+    avatarUrl: "",
   },
 
   /**
    * Initialize the manager
    */
   async init() {
-    console.log("Lever Job Application Manager initialized");
+    console.log("Breezy Job Application Manager initialized");
 
     // Set up connection listener for long-lived connections
-    chrome.runtime.onConnect.addListener(this.handleConnect.bind(this));
+    chrome.runtime.onConnect.addListener(this.handleBreezyConnect.bind(this));
 
     // Set up standard message listener for one-off messages
-    chrome.runtime.onMessage.addListener(this.handleLeverMessage.bind(this));
+    chrome.runtime.onMessage.addListener(this.handleBreezyMessage.bind(this));
 
     // Set up tab removal listener to clean up connections
     chrome.tabs.onRemoved.addListener(this.handleTabRemoved.bind(this));
-
-    // Add window removal listener to detect when automation window is closed
-    chrome.windows.onRemoved.addListener(this.handleWindowRemoved.bind(this));
 
     // Start health check interval
     this.startHealthCheck();
@@ -87,10 +91,7 @@ const LeverJobApplyManager = {
     }
 
     // Set up new interval
-    this.status.healthCheckInterval = setInterval(
-      () => this.checkHealth(),
-      60000
-    ); // Check every minute
+    this.status.healthCheckInterval = setInterval(() => this.checkHealth(), 60000); // Check every minute
   },
 
   /**
@@ -106,9 +107,7 @@ const LeverJobApplyManager = {
 
       // If task has been active for over 5 minutes, it's probably stuck
       if (taskTime > 5 * 60 * 1000) {
-        console.warn(
-          "CV task appears to be stuck for over 5 minutes, attempting recovery"
-        );
+        console.warn("CV task appears to be stuck for over 5 minutes, attempting recovery");
 
         try {
           // Force close the tab if it exists
@@ -191,7 +190,7 @@ const LeverJobApplyManager = {
 
     try {
       // Build search query
-      let searchQuery = `site:lever.co ${this.store.session.role}`;
+      let searchQuery = `site:breezy.hr ${this.store.session.role || "jobs"}`;
       if (this.store.session.country) {
         searchQuery += ` ${this.store.session.country}`;
       }
@@ -212,9 +211,7 @@ const LeverJobApplyManager = {
           await chrome.windows.get(this.windowId);
           // Create tab in existing window
           const tab = await chrome.tabs.create({
-            url: `https://www.google.com/search?q=${encodeURIComponent(
-              searchQuery
-            )}`,
+            url: `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`,
             windowId: this.windowId,
           });
           this.store.tasks.search.tabId = tab.id;
@@ -222,9 +219,7 @@ const LeverJobApplyManager = {
         } catch (windowError) {
           // Window doesn't exist, create new one
           const window = await chrome.windows.create({
-            url: `https://www.google.com/search?q=${encodeURIComponent(
-              searchQuery
-            )}`,
+            url: `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`,
             state: "maximized",
           });
           this.windowId = window.id;
@@ -234,9 +229,7 @@ const LeverJobApplyManager = {
       } else {
         // No window, create new one
         const window = await chrome.windows.create({
-          url: `https://www.google.com/search?q=${encodeURIComponent(
-            searchQuery
-          )}`,
+          url: `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`,
           state: "maximized",
         });
         this.windowId = window.id;
@@ -251,12 +244,12 @@ const LeverJobApplyManager = {
   /**
    * Handle connection request from content scripts
    */
-  handleConnect(port) {
+  handleBreezyConnect(port) {
     console.log("New connection established:", port.name);
     this.status.lastActivity = Date.now();
 
     // Store connection based on type
-    if (port.name.startsWith("lever-search-")) {
+    if (port.name.startsWith("breezy-search-")) {
       // Extract tab ID from port name
       const tabId = parseInt(port.name.split("-")[2]);
 
@@ -268,7 +261,7 @@ const LeverJobApplyManager = {
         this.store.tasks.search.tabId = tabId;
         console.log("Updated search tab ID to:", tabId);
       }
-    } else if (port.name.startsWith("lever-apply-")) {
+    } else if (port.name.startsWith("breezy-apply-")) {
       // Extract tab ID from port name
       const tabId = parseInt(port.name.split("-")[2]);
 
@@ -286,7 +279,7 @@ const LeverJobApplyManager = {
     port.onMessage.addListener((message, senderPort) => {
       console.log("Port message received:", message);
       this.status.lastActivity = Date.now();
-      this.handleLeverPortMessage(message, senderPort);
+      this.handleBreezyPortMessage(message, senderPort);
     });
 
     // Handle disconnection
@@ -312,7 +305,7 @@ const LeverJobApplyManager = {
   /**
    * Handle messages received through long-lived connections
    */
-  handleLeverPortMessage(message, port) {
+  handleBreezyPortMessage(message, port) {
     try {
       console.log("Port message received:", message);
       this.status.lastActivity = Date.now();
@@ -339,7 +332,6 @@ const LeverJobApplyManager = {
       }
 
       switch (type) {
-        // CRITICAL FIX: Add case for verification messages
         case "VERIFY_APPLICATION_STATUS":
           // Respond with the actual application status
           const isActive = this.store.tasks.sendCv.active;
@@ -368,6 +360,10 @@ const LeverJobApplyManager = {
 
         case "GET_SEARCH_TASK":
           this.handleGetSearchTask(port);
+          break;
+
+        case "GET_PROFILE_DATA":
+          this.handleGetProfileData(message.url, port);
           break;
 
         case "GET_SEND_CV_TASK":
@@ -465,12 +461,14 @@ const LeverJobApplyManager = {
     }
   },
 
-  // Helper method to find the tab ID associated with a port
+  /**
+   * Helper method to find the tab ID associated with a port
+   */
   findTabIdFromPort(port) {
     if (!port || !port.name) return null;
 
-    // Extract tab ID from port name (format: lever-TYPE-TABID)
-    const match = port.name.match(/lever-[^-]+-(\d+)/);
+    // Extract tab ID from port name (format: breezy-TYPE-TABID)
+    const match = port.name.match(/breezy-[^-]+-(\d+)/);
     if (match && match[1]) {
       return parseInt(match[1], 10);
     }
@@ -488,7 +486,7 @@ const LeverJobApplyManager = {
   /**
    * Handle one-off messages (not using long-lived connections)
    */
-  async handleLeverMessage(request, sender, sendResponse) {
+  async handleBreezyMessage(request, sender, sendResponse) {
     try {
       console.log("One-off message received:", request);
       this.status.lastActivity = Date.now();
@@ -529,6 +527,34 @@ const LeverJobApplyManager = {
           });
           break;
 
+        case "sendCvTaskDone":
+          this.handleSendCvTaskDoneMessage(request, sender, sendResponse);
+          break;
+
+        case "sendCvTaskError":
+          this.handleSendCvTaskErrorMessage(request, sender, sendResponse);
+          break;
+
+        case "sendCvTaskSkip":
+          this.handleSendCvTaskSkipMessage(request, sender, sendResponse);
+          break;
+
+        case "getProfileData":
+          this.handleGetProfileDataMessage(request, sender, sendResponse);
+          break;
+
+        case "openJobInNewTab":
+          await this.handleOpenJobInNewTab(request, sender, sendResponse);
+          break;
+
+        case "checkJobTabStatus":
+          this.handleCheckJobTabStatusMessage(request, sender, sendResponse);
+          break;
+
+        case "sendCvTabTimerEnded":
+          this.handleSendCvTabTimerEndedMessage(request, sender, sendResponse);
+          break;
+
         default:
           console.log("Unhandled one-off message type:", type);
           sendResponse({
@@ -537,7 +563,7 @@ const LeverJobApplyManager = {
           });
       }
     } catch (error) {
-      console.error("Error in handleLeverMessage:", error);
+      console.error("Error in handleBreezyMessage:", error);
       sendResponse({
         type: "ERROR",
         message: error.message,
@@ -661,6 +687,76 @@ const LeverJobApplyManager = {
   },
 
   /**
+   * Handler for GET_PROFILE_DATA messages
+   */
+  async handleGetProfileData(url, port) {
+    try {
+      console.log("Getting profile data for URL:", url);
+
+      if (this.store.profile) {
+        console.log("Using cached profile data");
+        this.trySendResponse(port, {
+          type: "PROFILE_DATA_RESPONSE",
+          success: true,
+          data: this.store.profile,
+        });
+        return;
+      }
+
+      // If no cached profile, fetch from API
+      const userId = this.store.userId || this.store.session?.userId;
+      if (!userId) {
+        throw new Error("User ID not available");
+      }
+
+      // Make sure we have a server base URL
+      if (!this.store.serverBaseUrl) {
+        this.store.serverBaseUrl = HOST;
+        console.log("Using default server base URL:", HOST);
+      }
+
+      // Fetch user data from API
+      console.log("Fetching user data from API for userId:", userId);
+      const response = await fetch(`${this.store.serverBaseUrl}/api/user/${userId}`);
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch user details: ${response.status}`);
+      }
+
+      const userData = await response.json();
+      console.log("User data fetched successfully");
+
+      // Format data consistently
+      const formattedData = formatUserDataForJobApplication(
+        userData,
+        userId,
+        this.store.session?.apiKey,
+        this.store.tasks.search.limit || 10,
+        "breezy",
+        this.store.serverBaseUrl,
+        this.store.devMode || false
+      );
+
+      // Cache profile data
+      this.store.profile = formattedData.profile;
+
+      // Send response
+      this.trySendResponse(port, {
+        type: "PROFILE_DATA_RESPONSE",
+        success: true,
+        data: this.store.profile,
+      });
+    } catch (error) {
+      console.error("Error getting profile data:", error);
+      this.trySendResponse(port, {
+        type: "PROFILE_DATA_RESPONSE",
+        success: false,
+        message: error.message,
+      });
+    }
+  },
+
+  /**
    * Handler for GET_SEND_CV_TASK messages
    */
   handleGetSendCvTask(port) {
@@ -693,14 +789,14 @@ const LeverJobApplyManager = {
    */
   async startJobSearch(request, sendResponse) {
     try {
-      console.log("Starting Lever job search:", request);
+      console.log("Starting Breezy job search:", request);
 
       if (this.store.started) {
         console.log("Job search already started, skipping duplicate start");
         sendResponse({
           status: "already_started",
-          platform: "lever",
-          message: "Lever job search already in progress",
+          platform: "breezy",
+          message: "Breezy job search already in progress",
         });
         return;
       }
@@ -720,26 +816,25 @@ const LeverJobApplyManager = {
         userId,
         sessionToken,
         jobsToApply,
-        "lever",
+        "breezy",
         HOST,
         request.devMode || false
       );
 
       const submittedLinks = formatApplicationsToSubmittedLinks(
         request.submittedLinks || [],
-        "lever"
+        "breezy"
       );
-
-      console.log("formatApplicationsToSubmittedLinks", submittedLinks);
-      console.log("request.submittedLinks", request.submittedLinks);
 
       this.store.submittedLinks = submittedLinks || [];
       this.store.profile = formattedData.profile;
       this.store.session = formattedData.session;
       this.store.avatarUrl = formattedData.avatarUrl;
+      this.store.userId = userId;
+      this.store.serverBaseUrl = HOST;
 
       // Build search query for Google
-      let searchQuery = `site:lever.co ${this.store.session.role}`;
+      let searchQuery = `site:breezy.hr ${this.store.session.role}`;
       if (this.store.session.country) {
         searchQuery += ` ${this.store.session.country}`;
       }
@@ -758,23 +853,19 @@ const LeverJobApplyManager = {
         try {
           const existingWindow = await chrome.windows.get(this.windowId);
           if (existingWindow) {
-            console.log(
-              "Window already exists, focusing it instead of creating new one"
-            );
+            console.log("Window already exists, focusing it instead of creating new one");
             await chrome.windows.update(this.windowId, { focused: true });
 
             // Just update the search tab with the new query
             if (this.store.tasks.search.tabId) {
               await chrome.tabs.update(this.store.tasks.search.tabId, {
-                url: `https://www.google.com/search?q=${encodeURIComponent(
-                  searchQuery
-                )}`,
+                url: `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`,
               });
 
               sendResponse({
                 status: "updated",
-                platform: "lever",
-                message: "Lever job search updated with new query",
+                platform: "breezy",
+                message: "Breezy job search updated with new query",
               });
               return;
             }
@@ -788,9 +879,7 @@ const LeverJobApplyManager = {
 
       // Create window with Google search
       const window = await chrome.windows.create({
-        url: `https://www.google.com/search?q=${encodeURIComponent(
-          searchQuery
-        )}`,
+        url: `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`,
         state: "maximized",
       });
 
@@ -798,25 +887,81 @@ const LeverJobApplyManager = {
       this.store.tasks.search.tabId = window.tabs[0].id;
       this.store.tasks.search.limit = this.store.session.liftsLimit || 100;
       this.store.tasks.search.current = this.store.session.liftsCurrent || 0;
-      this.store.tasks.search.domain = ["https://jobs.lever.co"];
+      this.store.tasks.search.domain = ["breezy.hr", "app.breezy.hr"];
+      this.store.windowTimestamp = Date.now();
+      this.store.searchTabTimestamp = Date.now();
 
-      // Regular expression pattern for Lever jobs
+      // Regular expression pattern for Breezy jobs
       this.store.tasks.search.searchLinkPattern =
-        /^https:\/\/jobs\.(eu\.)?lever\.co\/([^\/]*)\/([^\/]*)\/?(.*)?$/.toString();
+        /^https:\/\/([\w-]+\.breezy\.hr\/p\/|app\.breezy\.hr\/jobs\/)([^\/]+)\/?.*$/.toString();
 
       this.store.started = true;
 
       sendResponse({
         status: "started",
-        platform: "lever",
-        message: "Lever job search process initiated",
+        platform: "breezy",
+        message: "Breezy job search process initiated",
       });
     } catch (error) {
-      console.error("Error starting Lever job search:", error);
+      console.error("Error starting Breezy job search:", error);
       sendResponse({
         status: "error",
-        platform: "lever",
-        message: "Failed to start Lever job search: " + error.message,
+        platform: "breezy",
+        message: "Failed to start Breezy job search: " + error.message,
+      });
+    }
+  },
+
+  /**
+   * Handle open job in new tab request
+   */
+  async handleOpenJobInNewTab(request, sender, sendResponse) {
+    try {
+      // Check if already processing a job
+      if (this.store.tasks.sendCv.active || this.store.isProcessingJob) {
+        console.log("Already processing a job, ignoring new tab request");
+        sendResponse({
+          success: false,
+          message: "Already processing another job",
+        });
+        return;
+      }
+
+      // Mark as processing immediately to prevent race conditions
+      this.store.isProcessingJob = true;
+      this.store.tasks.sendCv.active = true;
+      this.store.tasks.sendCv.url = request.url;
+      this.store.applyTabOpened = Date.now();
+      this.store.applyTabTimestamp = Date.now();
+      this.store.tasks.sendCv.startTime = Date.now();
+
+      // Create tab
+      const tab = await chrome.tabs.create({
+        url: request.url,
+        windowId: this.windowId,
+      });
+
+      // Set tab ID
+      this.store.tasks.sendCv.tabId = tab.id;
+
+      console.log("Job tab opened", { tabId: tab.id, url: request.url });
+
+      sendResponse({
+        success: true,
+        tabId: tab.id,
+      });
+    } catch (error) {
+      // Reset flags on error
+      this.store.isProcessingJob = false;
+      this.store.tasks.sendCv.active = false;
+      this.store.tasks.sendCv.url = null;
+      this.store.applyTabOpened = null;
+      this.store.tasks.sendCv.startTime = null;
+
+      console.error("Error opening job tab:", error);
+      sendResponse({
+        success: false,
+        message: error.message,
       });
     }
   },
@@ -852,10 +997,6 @@ const LeverJobApplyManager = {
         return;
       }
 
-      const applyUrl = data.url.endsWith("/apply")
-        ? data.url
-        : data.url + "/apply";
-
       this.store.submittedLinks.push({
         url: data.url,
         status: "PROCESSING",
@@ -868,15 +1009,16 @@ const LeverJobApplyManager = {
       });
 
       const tab = await chrome.tabs.create({
-        url: applyUrl,
+        url: data.url,
         windowId: this.windowId,
       });
 
       this.store.tasks.sendCv.url = data.url;
       this.store.tasks.sendCv.tabId = tab.id;
       this.store.tasks.sendCv.active = true;
-      this.store.tasks.sendCv.finalUrl = applyUrl;
       this.store.tasks.sendCv.startTime = Date.now();
+      this.store.applyTabOpened = Date.now();
+      this.store.applyTabTimestamp = Date.now();
     } catch (error) {
       console.error("Error in handleSendCvTask:", error);
 
@@ -935,7 +1077,7 @@ const LeverJobApplyManager = {
 
         if (applicationData) {
           applicationData.userId = userId;
-          applicationData.applicationPlatform = "Lever";
+          applicationData.applicationPlatform = "Breezy";
 
           apiPromises.push(
             fetch(`${HOST}/api/applied-jobs`, {
@@ -993,15 +1135,14 @@ const LeverJobApplyManager = {
         finalUrl: null,
         startTime: null,
       };
+      this.store.isProcessingJob = false;
+      this.store.applyTabOpened = null;
 
       // Increment application counter
-      this.store.tasks.search.current =
-        (this.store.tasks.search.current || 0) + 1;
+      this.store.tasks.search.current = (this.store.tasks.search.current || 0) + 1;
 
       // Log for debugging
-      console.log(
-        `Completed application ${this.store.tasks.search.current} of ${this.store.tasks.search.limit}`
-      );
+      console.log(`Completed application ${this.store.tasks.search.current} of ${this.store.tasks.search.limit}`);
 
       const currentLifts = this.store.tasks.search.current;
       const maxLifts = this.store.tasks.search.limit || 100;
@@ -1031,6 +1172,8 @@ const LeverJobApplyManager = {
           finalUrl: null,
           startTime: null,
         };
+        this.store.isProcessingJob = false;
+        this.store.applyTabOpened = null;
 
         // Notify search tab
         this.sendSearchNextMessage({
@@ -1045,48 +1188,151 @@ const LeverJobApplyManager = {
   },
 
   /**
-   * Safely send SEARCH_NEXT message using all available methods
+   * Handle message-based SEND_CV_TASK_DONE
    */
-  sendSearchNextMessage(data) {
-    console.log("Sending SEARCH_NEXT message:", data);
-    let sent = false;
+  async handleSendCvTaskDoneMessage(request, sender, sendResponse) {
+    try {
+      console.log("Handling CV task completion from message:", request);
 
-    // Try using the search connection if available
-    if (this.connections.search) {
+      // Add to submitted links with success status
+      this.store.submittedLinks.push({
+        url: request.url || sender.tab.url,
+        details: request.data || null,
+        status: "SUCCESS",
+        timestamp: Date.now(),
+      });
+
+      const userId = this.store.session?.userId;
+
       try {
-        this.connections.search.postMessage({
-          type: "SEARCH_NEXT",
-          data,
-        });
-        sent = true;
-        console.log("Sent SEARCH_NEXT via search connection");
-      } catch (searchError) {
-        console.warn("Error sending via search connection:", searchError);
+        const apiPromises = [];
+
+        if (userId) {
+          apiPromises.push(
+            fetch(`${HOST}/api/applications`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                userId,
+              }),
+            }).then((response) => {
+              if (!response.ok) {
+                throw new Error(`API returned ${response.status}`);
+              }
+              return response;
+            })
+          );
+        }
+
+        if (request.data) {
+          request.data.userId = userId;
+          request.data.applicationPlatform = "Breezy";
+
+          apiPromises.push(
+            fetch(`${HOST}/api/applied-jobs`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(request.data),
+            }).then((response) => {
+              if (!response.ok) {
+                throw new Error(`API returned ${response.status}`);
+              }
+              return response;
+            })
+          );
+        }
+
+        if (apiPromises.length > 0) {
+          await Promise.all(apiPromises);
+          console.log("All API calls completed successfully");
+        }
+      } catch (apiError) {
+        console.error("API error:", apiError);
       }
-    }
 
-    // If that failed, try using tabs API
-    if (!sent && this.store.tasks.search.tabId) {
+      // Try to close the tab
       try {
-        chrome.tabs.sendMessage(this.store.tasks.search.tabId, {
-          type: "SEARCH_NEXT",
-          data,
-        });
-        sent = true;
-        console.log("Sent SEARCH_NEXT via tabs API");
+        if (sender.tab?.id) {
+          await chrome.tabs.remove(sender.tab.id);
+        } else if (this.store.tasks.sendCv.tabId) {
+          await chrome.tabs.remove(this.store.tasks.sendCv.tabId);
+        }
       } catch (tabError) {
-        console.warn("Error sending via tabs API:", tabError);
+        console.error("Tab removal error:", tabError);
+      }
+
+      // Save old URL before resetting
+      const oldUrl = this.store.tasks.sendCv.url || request.url || sender.tab.url;
+
+      // Reset task state
+      this.store.tasks.sendCv = {
+        url: null,
+        tabId: null,
+        active: false,
+        finalUrl: null,
+        startTime: null,
+      };
+      this.store.isProcessingJob = false;
+      this.store.applyTabOpened = null;
+
+      // Increment application counter
+      this.store.tasks.search.current = (this.store.tasks.search.current || 0) + 1;
+
+      sendResponse({ status: "success" });
+
+      const currentLifts = this.store.tasks.search.current;
+      const maxLifts = this.store.tasks.search.limit || 100;
+
+      // Check if we've reached the limit
+      if (currentLifts >= maxLifts) {
+        await this.finishSuccess("lifts-out");
+      } else {
+        // Notify search tab to continue to next job
+        try {
+          if (this.store.tasks.search.tabId) {
+            await chrome.tabs.sendMessage(this.store.tasks.search.tabId, {
+              type: "SEARCH_NEXT",
+              data: { url: oldUrl, status: "SUCCESS" },
+            });
+          }
+        } catch (messageError) {
+          console.error("Error sending searchNext message:", messageError);
+        }
+      }
+    } catch (error) {
+      console.error("Error handling sendCvTaskDone message:", error);
+      sendResponse({ status: "error", message: error.message });
+
+      // Try to reset state and continue
+      try {
+        this.store.tasks.sendCv = {
+          url: null,
+          tabId: null,
+          active: false,
+          finalUrl: null,
+          startTime: null,
+        };
+        this.store.isProcessingJob = false;
+        this.store.applyTabOpened = null;
+
+        if (this.store.tasks.search.tabId) {
+          await chrome.tabs.sendMessage(this.store.tasks.search.tabId, {
+            type: "SEARCH_NEXT",
+            data: {
+              url: request.url || sender.tab.url,
+              status: "ERROR",
+              message: error.message,
+            },
+          });
+        }
+      } catch (recoveryError) {
+        console.error("Error in recovery attempt:", recoveryError);
       }
     }
-
-    // If still not sent, log warning
-    if (!sent) {
-      console.warn(
-        "Failed to send SEARCH_NEXT message. Will rely on timeout recovery."
-      );
-    }
-
-    return sent;
   },
 
   /**
@@ -1130,16 +1376,80 @@ const LeverJobApplyManager = {
         finalUrl: null,
         startTime: null,
       };
+      this.store.isProcessingJob = false;
+      this.store.applyTabOpened = null;
 
       // Notify search tab to continue
       this.sendSearchNextMessage({
         url: oldUrl,
         status: "ERROR",
-        message:
-          typeof errorData === "string" ? errorData : "Application error",
+        message: typeof errorData === "string" ? errorData : "Application error",
       });
     } catch (error) {
       console.error("Error handling CV task error:", error);
+    }
+  },
+
+  /**
+   * Handle message-based SEND_CV_TASK_ERROR
+   */
+  async handleSendCvTaskErrorMessage(request, sender, sendResponse) {
+    try {
+      console.log("Handling CV task error from message:", request);
+
+      // Add to submitted links with error status
+      this.store.submittedLinks.push({
+        url: request.url || sender.tab.url,
+        error: request.message,
+        status: "ERROR",
+        timestamp: Date.now(),
+      });
+
+      // Try to close the tab
+      try {
+        if (sender.tab?.id) {
+          await chrome.tabs.remove(sender.tab.id);
+        } else if (this.store.tasks.sendCv.tabId) {
+          await chrome.tabs.remove(this.store.tasks.sendCv.tabId);
+        }
+      } catch (tabError) {
+        console.error("Tab removal error:", tabError);
+      }
+
+      // Save old URL before resetting
+      const oldUrl = this.store.tasks.sendCv.url || request.url || sender.tab.url;
+
+      // Reset task state
+      this.store.tasks.sendCv = {
+        url: null,
+        tabId: null,
+        active: false,
+        finalUrl: null,
+        startTime: null,
+      };
+      this.store.isProcessingJob = false;
+      this.store.applyTabOpened = null;
+
+      sendResponse({ status: "success" });
+
+      // Notify search tab to continue
+      try {
+        if (this.store.tasks.search.tabId) {
+          await chrome.tabs.sendMessage(this.store.tasks.search.tabId, {
+            type: "SEARCH_NEXT",
+            data: {
+              url: oldUrl,
+              status: "ERROR",
+              message: request.message || "Application error",
+            },
+          });
+        }
+      } catch (messageError) {
+        console.error("Error sending searchNext message:", messageError);
+      }
+    } catch (error) {
+      console.error("Error handling sendCvTaskError message:", error);
+      sendResponse({ status: "error", message: error.message });
     }
   },
 
@@ -1184,6 +1494,8 @@ const LeverJobApplyManager = {
         finalUrl: null,
         startTime: null,
       };
+      this.store.isProcessingJob = false;
+      this.store.applyTabOpened = null;
 
       // Notify search tab to continue
       this.sendSearchNextMessage({
@@ -1194,6 +1506,175 @@ const LeverJobApplyManager = {
     } catch (error) {
       console.error("Error handling CV task skip:", error);
     }
+  },
+
+  /**
+   * Handle message-based SEND_CV_TASK_SKIP
+   */
+  async handleSendCvTaskSkipMessage(request, sender, sendResponse) {
+    try {
+      console.log("Handling CV task skip from message:", request);
+
+      // Add to submitted links with skipped status
+      this.store.submittedLinks.push({
+        url: request.url || sender.tab.url,
+        reason: request.message,
+        status: "SKIPPED",
+        timestamp: Date.now(),
+      });
+
+      // Try to close the tab
+      try {
+        if (sender.tab?.id) {
+          await chrome.tabs.remove(sender.tab.id);
+        } else if (this.store.tasks.sendCv.tabId) {
+          await chrome.tabs.remove(this.store.tasks.sendCv.tabId);
+        }
+      } catch (tabError) {
+        console.error("Tab removal error:", tabError);
+      }
+
+      // Save old URL before resetting
+      const oldUrl = this.store.tasks.sendCv.url || request.url || sender.tab.url;
+
+      // Reset task state
+      this.store.tasks.sendCv = {
+        url: null,
+        tabId: null,
+        active: false,
+        finalUrl: null,
+        startTime: null,
+      };
+      this.store.isProcessingJob = false;
+      this.store.applyTabOpened = null;
+
+      sendResponse({ status: "success" });
+
+      // Notify search tab to continue
+      try {
+        if (this.store.tasks.search.tabId) {
+          await chrome.tabs.sendMessage(this.store.tasks.search.tabId, {
+            type: "SEARCH_NEXT",
+            data: {
+              url: oldUrl,
+              status: "SKIPPED",
+              message: request.message || "Skipped application",
+            },
+          });
+        }
+      } catch (messageError) {
+        console.error("Error sending searchNext message:", messageError);
+      }
+    } catch (error) {
+      console.error("Error handling sendCvTaskSkip message:", error);
+      sendResponse({ status: "error", message: error.message });
+    }
+  },
+
+  /**
+   * Handle timer ended message
+   */
+  async handleSendCvTabTimerEndedMessage(request, sender, sendResponse) {
+    try {
+      console.log("CV tab timer ended for:", request.url || sender.tab.url);
+
+      // Add to submitted links with timeout status
+      this.store.submittedLinks.push({
+        url: request.url || sender.tab.url,
+        status: "TIMEOUT",
+        error: "Application timed out",
+        timestamp: Date.now(),
+      });
+
+      // Try to close the tab
+      try {
+        if (sender.tab?.id) {
+          await chrome.tabs.remove(sender.tab.id);
+        } else if (this.store.tasks.sendCv.tabId) {
+          await chrome.tabs.remove(this.store.tasks.sendCv.tabId);
+        }
+      } catch (tabError) {
+        console.error("Tab removal error:", tabError);
+      }
+
+      // Save old URL before resetting
+      const oldUrl = this.store.tasks.sendCv.url || request.url || sender.tab.url;
+
+      // Reset task state
+      this.store.tasks.sendCv = {
+        url: null,
+        tabId: null,
+        active: false,
+        finalUrl: null,
+        startTime: null,
+      };
+      this.store.isProcessingJob = false;
+      this.store.applyTabOpened = null;
+
+      sendResponse({ status: "success" });
+
+      // Notify search tab to continue
+      try {
+        if (this.store.tasks.search.tabId) {
+          await chrome.tabs.sendMessage(this.store.tasks.search.tabId, {
+            type: "SEARCH_NEXT",
+            data: {
+              url: oldUrl,
+              status: "ERROR",
+              message: "Application timed out",
+            },
+          });
+        }
+      } catch (messageError) {
+        console.error("Error sending searchNext message:", messageError);
+      }
+    } catch (error) {
+      console.error("Error handling timer ended message:", error);
+      sendResponse({ status: "error", message: error.message });
+    }
+  },
+
+  /**
+   * Safely send SEARCH_NEXT message using all available methods
+   */
+  sendSearchNextMessage(data) {
+    console.log("Sending SEARCH_NEXT message:", data);
+    let sent = false;
+
+    // Try using the search connection if available
+    if (this.connections.search) {
+      try {
+        this.connections.search.postMessage({
+          type: "SEARCH_NEXT",
+          data,
+        });
+        sent = true;
+        console.log("Sent SEARCH_NEXT via search connection");
+      } catch (searchError) {
+        console.warn("Error sending via search connection:", searchError);
+      }
+    }
+
+    // If that failed, try using tabs API
+    if (!sent && this.store.tasks.search.tabId) {
+      try {
+        chrome.tabs.sendMessage(this.store.tasks.search.tabId, {
+          type: "SEARCH_NEXT",
+          data,
+        });
+        sent = true;
+        console.log("Sent SEARCH_NEXT via tabs API");
+      } catch (tabError) {
+        console.warn("Error sending via tabs API:", tabError);
+      }
+    }
+
+    // If still not sent, log warning
+    if (!sent) {
+      console.warn("Failed to send SEARCH_NEXT message. Will rely on timeout recovery.");
+    }
+
+    return sent;
   },
 
   /**
@@ -1208,7 +1689,7 @@ const LeverJobApplyManager = {
         chrome.notifications.create({
           type: "basic",
           iconUrl: "icon.png", // Update with your extension's icon
-          title: "Lever Job Search Completed",
+          title: "Breezy Job Search Completed",
           message: `Successfully processed ${this.store.tasks.search.current} job listings.`,
         });
       } catch (notificationError) {
@@ -1237,11 +1718,8 @@ const LeverJobApplyManager = {
         chrome.notifications.create({
           type: "basic",
           iconUrl: "icon.png", // Update with your extension's icon
-          title: "Lever Job Search Error",
-          message:
-            typeof errorData === "string"
-              ? errorData
-              : "An error occurred during job search.",
+          title: "Breezy Job Search Error",
+          message: typeof errorData === "string" ? errorData : "An error occurred during job search.",
         });
       } catch (notificationError) {
         console.warn("Error showing notification:", notificationError);
@@ -1295,6 +1773,8 @@ const LeverJobApplyManager = {
         finalUrl: null,
         startTime: null,
       };
+      this.store.isProcessingJob = false;
+      this.store.applyTabOpened = null;
 
       // Notify search tab to continue
       this.sendSearchNextMessage({
@@ -1308,32 +1788,98 @@ const LeverJobApplyManager = {
   },
 
   /**
-   * Handler for successful completion of the automation
+   * Handle profile data request via message
    */
-  async finishSuccess(reason) {
+  async handleGetProfileDataMessage(request, sender, sendResponse) {
     try {
-      console.log("Automation completed successfully:", reason);
+      console.log("Handling getProfileData request");
 
-      // Show completion notification
-      try {
-        chrome.notifications.create({
-          type: "basic",
-          iconUrl: "icon.png", // Update with your extension's icon
-          title: "Lever Job Search Completed",
-          message: `Successfully completed ${this.store.tasks.search.current} applications.`,
+      // Check if we already have profile data cached
+      if (this.store.profile) {
+        console.log("Returning cached profile data");
+        sendResponse({
+          success: true,
+          data: this.store.profile,
         });
-      } catch (notificationError) {
-        console.warn("Error showing notification:", notificationError);
+        return;
       }
 
-      // Reset state
-      this.store.started = false;
+      // Get userId from store
+      const userId = this.store.userId || this.store.session?.userId;
+      if (!userId) {
+        throw new Error("User ID not available");
+      }
 
-      // Keep window open but mark as completed
-      console.log("All tasks completed successfully");
+      // Make sure we have a serverBaseUrl
+      if (!this.store.serverBaseUrl) {
+        this.store.serverBaseUrl = HOST;
+        console.log("Set default serverBaseUrl");
+      }
+
+      console.log("Fetching user data from API", {
+        userId,
+        serverBaseUrl: this.store.serverBaseUrl,
+      });
+
+      // Fetch user data from API
+      const response = await fetch(`${this.store.serverBaseUrl}/api/user/${userId}`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch user details: ${response.status}`);
+      }
+
+      const userData = await response.json();
+      console.log("User data fetched successfully");
+
+      // Format the data using your formatter function
+      const formattedData = formatUserDataForJobApplication(
+        userData,
+        userId,
+        this.store.sessionToken,
+        this.store.tasks.search.limit || 10,
+        "breezy",
+        this.store.serverBaseUrl,
+        this.store.devMode || false
+      );
+
+      // Cache the profile data
+      this.store.profile = formattedData.profile;
+
+      // Return the profile data
+      sendResponse({
+        success: true,
+        data: this.store.profile,
+      });
+
+      console.log("Profile data sent as response");
     } catch (error) {
-      console.error("Error in finishSuccess:", error);
+      console.error("Error fetching profile data:", error);
+      sendResponse({
+        success: false,
+        message: error.message,
+      });
     }
+  },
+
+  /**
+   * Handle job tab status check via message
+   */
+  handleCheckJobTabStatusMessage(request, sender, sendResponse) {
+    console.log("Checking job tab status via message");
+
+    // Check if a job tab is currently open
+    const isJobTabOpen = this.store.tasks.sendCv.tabId !== null && this.store.tasks.sendCv.active === true;
+
+    console.log("Job tab status:", {
+      isJobTabOpen,
+      jobTabId: this.store.tasks.sendCv.tabId,
+      jobActive: this.store.tasks.sendCv.active,
+    });
+
+    sendResponse({
+      status: "success",
+      isJobTabOpen: isJobTabOpen,
+      jobTabId: this.store.tasks.sendCv.tabId,
+    });
   },
 
   /**
@@ -1347,10 +1893,7 @@ const LeverJobApplyManager = {
       this.store.isProcessingJob = false;
     }
 
-    if (
-      this.store.tasks.sendCv.tabId !== null &&
-      this.store.tasks.sendCv.active === true
-    ) {
+    if (this.store.tasks.sendCv.tabId !== null && this.store.tasks.sendCv.active === true) {
       // Job tab is open and active - set processing flag to true
       console.log("Job tab is open and active", {
         tabId: this.store.tasks.sendCv.tabId,
@@ -1401,64 +1944,35 @@ const LeverJobApplyManager = {
     });
   },
 
-  // Add this new method to LeverJobApplyManager
   /**
-   * Handle window removal to stop automation when main window is closed
+   * Handler for successful completion of the automation
    */
-  handleWindowRemoved(windowId) {
-    console.log("Window removed:", windowId);
+  async finishSuccess(reason) {
+    try {
+      console.log("Automation completed successfully:", reason);
 
-    // Check if this is our automation window
-    if (this.windowId === windowId) {
-      console.log("Automation window was closed, stopping all processes");
-
-      // Reset window ID
-      this.windowId = null;
-
-      // Stop health check interval
-      if (this.status.healthCheckInterval) {
-        clearInterval(this.status.healthCheckInterval);
-        this.status.healthCheckInterval = null;
-      }
-
-      // Close any active CV tab if it exists in another window
-      if (this.store.tasks.sendCv.tabId) {
-        try {
-          chrome.tabs.remove(this.store.tasks.sendCv.tabId);
-        } catch (e) {
-          console.warn("Error closing CV tab:", e);
-        }
-      }
-
-      // Reset all automation state
-      this.store.tasks.sendCv = {
-        url: null,
-        tabId: null,
-        active: false,
-        finalUrl: null,
-        startTime: null,
-      };
-
-      this.store.tasks.search.tabId = null;
-      this.store.started = false;
-
-      // Log shutdown
-      console.log("Automation completely stopped due to window closure");
-
-      // Optional: Show notification that automation was stopped
+      // Show completion notification
       try {
         chrome.notifications.create({
           type: "basic",
-          iconUrl: "icon.png",
-          title: "Lever Job Search Stopped",
-          message:
-            "The job search automation was stopped because the window was closed.",
+          iconUrl: "icon.png", // Update with your extension's icon
+          title: "Breezy Job Search Completed",
+          message: `Successfully completed ${this.store.tasks.search.current} applications.`,
         });
-      } catch (error) {
-        console.warn("Error showing notification:", error);
+      } catch (notificationError) {
+        console.warn("Error showing notification:", notificationError);
       }
+
+      // Reset state
+      this.store.started = false;
+
+      // Keep window open but mark as completed
+      console.log("All tasks completed successfully");
+    } catch (error) {
+      console.error("Error in finishSuccess:", error);
     }
   },
 };
 
-export { LeverJobApplyManager };
+// Initialize the manager
+export { BreezyJobApplyManager };

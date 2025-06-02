@@ -4,11 +4,11 @@ const LinkedInJobApplyManager = {
   targetTabId: null,
 
   async init() {
-    chrome.runtime.onMessage.addListener(this.handleMessage.bind(this));
+    chrome.runtime.onMessage.addListener(this.handleLinkedinMessage.bind(this));
     console.log("LinkedIn Initialized!");
   },
 
-  async handleMessage(request, sender, sendResponse) {
+  async handleLinkedinMessage(request, sender, sendResponse) {
     try {
       switch (request.action) {
         case "HANDLE_EXTERNAL_APPLICATION":
@@ -92,7 +92,7 @@ const LinkedInJobApplyManager = {
           sendResponse({ status: "error", message: "Unknown action" });
       }
     } catch (error) {
-      console.error("Error in handleMessage:", error);
+      console.error("Error in handleLinkedinMessage:", error);
       sendResponse({ status: "error", message: error.message });
     }
 
