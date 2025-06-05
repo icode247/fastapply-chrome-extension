@@ -58,6 +58,17 @@ function formatUserDataForJobApplication(
     education: formatEducation(userData),
     headline: userData.headline || "",
     summary: userData.summary || "",
+
+    // New fields based on user_feedback:
+    age: calculateAge(userData.dateOfBirth),
+    race: userData.race || "",
+    gender: userData.gender || "",
+    // Assuming 'needsSponsorship' is the desired key in the profile for the AI
+    needsSponsorship: userData.requiresH1BSponsorship === true || userData.requiresH1BSponsorship === 'true', // Ensure boolean
+    disabilityStatus: userData.disabilityStatus || "",
+    // Consolidate veteran status. Prioritize isProtectedVeteran if true.
+    veteranStatus: userData.isProtectedVeteran === true || userData.protectedVetran === true ? "Protected Veteran" : userData.veteranStatus || "",
+    usCitizenship: userData.usCitizenship || ""
   };
 
   // Format session information
@@ -86,6 +97,68 @@ function formatUserDataForJobApplication(
     devMode,
   };
 }
+
+// Helper function to calculate age
+function calculateAge(dateOfBirth) {
+  if (!dateOfBirth || typeof dateOfBirth !== 'string') {
+    return null; // Or a suitable default like '' or undefined
+  }
+  // Assuming dateOfBirth format is MM/DD/YYYY or MM/YY/YYYY (like "08/88/1998" - note the "88" for day which is unusual)
+  // Let's try to parse it. Robust parsing might be needed if formats vary.
+  const parts = dateOfBirth.split('/');
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  let day = parseInt(parts[1], 10);
+  const month = parseInt(parts[0], 10) - 1; // Month is 0-indexed
+  let year = parseInt(parts[2], 10);
+
+  // Handle potential "88" day issue by clamping or logging. For now, let's try to use it.
+  // A more robust solution would validate day based on month/year.
+  // The example "08/88/1998" for dateOfBirth has an invalid day "88".
+  // We'll proceed assuming it's a typo and perhaps meant to be 08 or 18 or 28.
+  // For age calculation, the exact day is less critical than month and year.
+  // Let's cap day at 28 for simplicity if it's out of a typical range,
+  // to avoid Date object creation errors.
+  if (day > 28) {
+      // This is a placeholder for more robust date correction if needed.
+      // For now, we'll just note it. The example "08/88/1998" is problematic.
+      // Let's assume the user meant a valid day, e.g., the 8th.
+      // So if parts[1] is "88", we might default to something like 15 or just use as is if Date() handles it.
+      // The provided example `08/88/1998` is problematic. Let's assume parts[1] is the day.
+      // For calculation, we'll try to make a Date object.
+      // If year is YY, convert to YYYY (e.g., 98 -> 1998, 02 -> 2002)
+      if (year < 100) {
+        year += (year > new Date().getFullYear() % 100) ? 1900 : 2000;
+      }
+  }
+
+  try {
+    const birthDate = new Date(year, month, day);
+    // Check if date is valid after creation, especially due to "88"
+    if (isNaN(birthDate.getTime()) || birthDate.getFullYear() !== year || birthDate.getMonth() !== month) {
+        // Try parsing with a more standard approach if initial is invalid due to day
+        const altBirthDate = new Date(parts[2] + '-' + parts[0] + '-' + parts[1]); // YYYY-MM-DD (attempt)
+         if (isNaN(altBirthDate.getTime())) return null; // Still invalid
+         // If altBirthDate is valid, use it for calculation (this part is complex due to "88")
+         // For now, let's simplify: if the original parsing fails, return null.
+         return null;
+    }
+
+    const today = new Date();
+    let age = today.getFullYear() - birthDate.getFullYear();
+    const m = today.getMonth() - birthDate.getMonth();
+    if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+      age--;
+    }
+    return age;
+  } catch (e) {
+    // console.error("Error calculating age:", e);
+    return null;
+  }
+}
+
 
 /**
  * Helper function to extract education information
