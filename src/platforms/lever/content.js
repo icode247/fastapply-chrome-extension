@@ -1743,34 +1743,45 @@ class LeverJobAutomation {
     try {
       this.appendStatusMessage(`Processing checkbox group: "${group.label}"`);
 
-      // Extract options from the group into {text, value} structure
-      const structuredOptions = group.checkboxes.map((checkbox) => {
+      // Extract options from the group into a flat array of strings (value or text)
+      const optionsForAI = group.checkboxes.map(checkbox => {
         const label = checkbox.closest("label");
-        const span = label?.querySelector("span");
-        const text = span
-          ? span.textContent.trim()
-          : label?.textContent.trim() || checkbox.value;
-        return { text: text, value: checkbox.value };
-      });
+        const span = label?.querySelector("span.application-answer-alternative");
+        // Prioritize input value, then span text, then label text
+        let optValue = checkbox.value;
+        if (!optValue && span) optValue = span.textContent.trim();
+        if (!optValue && label) optValue = label.textContent.trim();
+        return (optValue || '').trim();
+      }).filter(optString => optString);
+
 
       // Skip empty groups
-      if (structuredOptions.length === 0) {
+      if (optionsForAI.length === 0) {
         this.appendStatusMessage("No options found in group, skipping");
         return;
       }
 
-      this.appendStatusMessage(`Group options for "${group.label}": ${structuredOptions.map(o => o.text).join(", ")}`);
+      this.appendStatusMessage(`Group options for "${group.label}" (for AI): ${optionsForAI.join(", ")}`);
+      debugLog("handleCheckboxGroup: Options for AI (string array) for group '"+group.label+"':", optionsForAI);
 
       // For all other groups, ask AI what to select
       try {
-        // Get answer from AI, passing structuredOptions
-        const answerFromAI = await this.getAnswer(group.label, structuredOptions, profile);
+        // Get answer from AI, passing the flat array of strings
+        const answerFromAI = await this.getAnswer(group.label, optionsForAI, profile);
         debugLog("handleCheckboxGroup: Group:", group.label, "AI Answer:", answerFromAI);
 
         if (answerFromAI) {
           this.appendStatusMessage(`AI recommendation for "${group.label}": ${answerFromAI}`);
-          // Parse the answer - could be multiple selections. Pass structuredOptions for parsing.
-          const textsToSelect = this.parseSelectedOptions(answerFromAI, structuredOptions);
+
+           const structuredOptionsForParser = group.checkboxes.map((checkbox) => {
+            const label = checkbox.closest("label");
+            const span = label?.querySelector("span.application-answer-alternative");
+            const displayTxt = span ? span.textContent.trim() : (label?.textContent.trim() || checkbox.value);
+            return { text: displayTxt, value: checkbox.value || displayTxt };
+          });
+          debugLog("handleCheckboxGroup: Structured options for parseSelectedOptions for group '"+group.label+"':", structuredOptionsForParser);
+          const textsToSelect = this.parseSelectedOptions(answerFromAI, structuredOptionsForParser);
+
 
           if (textsToSelect.length > 0) {
             for (const textToSelect of textsToSelect) {
@@ -1827,6 +1838,7 @@ class LeverJobAutomation {
 
   // Parse selected options from AI answer
   parseSelectedOptions(answerFromAI, availableOptionsOnForm) { // availableOptionsOnForm is now array of {text, value}
+    debugLog("parseSelectedOptions: Received AI answer:", answerFromAI, "Available structured options:", availableOptionsOnForm);
     if (!answerFromAI) return [];
 
     const individualAnswers = answerFromAI.split(',').map(s => s.trim().toLowerCase());
@@ -1836,14 +1848,18 @@ class LeverJobAutomation {
       const optionTextLower = optionOnForm.text.toLowerCase();
       const optionValueLower = optionOnForm.value ? optionOnForm.value.toLowerCase() : ""; // Handle cases where value might be null/undefined
 
-      for (const individualAnswer of individualAnswers) {
+      for (let i = 0; i < individualAnswers.length; i++) { // Changed to allow access to individualAnswers[i] for logging
+        const individualAnswer = individualAnswers[i];
         if (individualAnswer === optionTextLower || (optionValueLower && individualAnswer === optionValueLower)) {
+          debugLog("parseSelectedOptions: Matched AI answer part '"+ individualAnswer +"' with option text '"+optionOnForm.text+"' or value '"+optionOnForm.value+"'");
           matchedDisplayTexts.add(optionOnForm.text); // Add the display text to the set
           break; // Found a match for this optionOnForm, move to the next
         }
       }
     }
-    return Array.from(matchedDisplayTexts); // Convert Set to array
+    const selectedTexts = Array.from(matchedDisplayTexts);
+    debugLog("parseSelectedOptions: Returning selected display texts:", selectedTexts);
+    return selectedTexts; // Convert Set to array
   }
 
   // Check a specific option in a checkbox group
@@ -1855,10 +1871,18 @@ class LeverJobAutomation {
         ? span.textContent.trim()
         : label?.textContent.trim() || checkbox.value;
       const checkboxValue = checkbox.value;
+      const checkboxLabelLower = checkboxLabel.toLowerCase();
+      const optionTextLower = optionTextFromParse.toLowerCase();
 
-      if (checkboxLabel.toLowerCase() === optionTextFromParse.toLowerCase() ||
-          (checkboxValue && checkboxValue.toLowerCase() === optionTextFromParse.toLowerCase())) {
-        debugLog("handleCheckboxGroup: Checking option '"+ checkboxLabel +"' (value: '"+checkboxValue+"') for group '"+groupLabelForDebug+"' based on AI answer '"+optionTextFromParse+"'");
+      let matchReason = "";
+      if (checkboxLabelLower === optionTextLower) {
+          matchReason = "matched display label";
+      } else if (checkboxValue && checkboxValue.toLowerCase() === optionTextLower) {
+          matchReason = "matched value attribute";
+      }
+
+      if (matchReason) {
+        debugLog("checkSpecificOption: Checking option '"+ checkboxLabel +"' (value: '"+checkboxValue+"') for group '"+groupLabelForDebug+"'. Reason: " + matchReason);
         this.appendStatusMessage(`Selecting option: "${checkboxLabel}"`);
 
         // Scroll to the checkbox
@@ -2791,75 +2815,74 @@ class LeverJobAutomation {
   /**
    * Enhanced version of selectOptionByValue that uses multiple approaches
    */
-  async selectOptionByValueEnhanced(select, value) {
-    if (!select || !value) return false;
+  async selectOptionByValueEnhanced(select, aiAnswer) { // Renamed 'value' to 'aiAnswer' for clarity
+    debugLog("selectOptionByValueEnhanced: Attempting to select in dropdown for AI answer '"+aiAnswer+"'. Options count:", select.options.length);
+    if (!select || !aiAnswer) return false;
 
     try {
       this.scrollToTargetAdjusted(select, 100);
       await this.wait(300);
 
-      // Convert value to lowercase string for comparison
-      const valueText = String(value).toLowerCase();
+      // Convert AI answer to lowercase string for comparison
+      const aiAnswerLower = String(aiAnswer).toLowerCase();
       let matchFound = false;
+      let selectedOptionDetails = {}; // To store details for logging
 
       // Try each option to find a match
       for (let i = 0; i < select.options.length; i++) {
         const option = select.options[i];
-        const optionText = option.text.toLowerCase();
-        const optionValue = option.value.toLowerCase();
+        const optionTextLower = option.text.toLowerCase();
+        const optionValueLower = option.value.toLowerCase();
+        let matchReason = "";
 
-        // Try to match by text or value
-        if (
-          optionText === valueText ||
-          optionValue === valueText ||
-          optionText.includes(valueText) ||
-          valueText.includes(optionText)
-        ) {
-          // Multiple approaches to set the selected option
+        if (optionValueLower && optionValueLower === aiAnswerLower) { // Check option.value first
+            matchReason = "exact value match";
+        } else if (optionTextLower === aiAnswerLower) {
+            matchReason = "exact text match";
+        } else if (optionValueLower && optionValueLower.includes(aiAnswerLower)) {
+            matchReason = "AI answer included in value";
+        } else if (optionTextLower.includes(aiAnswerLower)) {
+            matchReason = "AI answer included in text";
+        } else if (optionValueLower && aiAnswerLower.includes(optionValueLower)) {
+            matchReason = "value included in AI answer";
+        } else if (optionTextLower && aiAnswerLower.includes(optionTextLower) ) {
+             matchReason = "text included in AI answer";
+        }
 
-          // Approach 1: Set the selectedIndex
-          select.selectedIndex = i;
-          select.dispatchEvent(new Event("change", { bubbles: true }));
-          await this.wait(300);
 
-          // Approach 2: Set the value
-          select.value = option.value;
-          select.dispatchEvent(new Event("change", { bubbles: true }));
-          await this.wait(300);
-
-          // Approach 3: Set the selected property
-          option.selected = true;
+        if (matchReason) {
+          select.value = option.value; // Set by value
           select.dispatchEvent(new Event("change", { bubbles: true }));
 
-          this.appendStatusMessage(`Selected option: ${option.text}`);
-          matchFound = true;
-          break;
+          // Verify selection (especially for dynamically changing selects)
+          if (select.value === option.value) {
+            this.appendStatusMessage(`Selected option: ${option.text}`);
+            selectedOptionDetails = { text: option.text, value: option.value, reason: matchReason };
+            matchFound = true;
+            break;
+          } else {
+            // If direct value setting failed, try by selectedIndex for resilience
+            select.selectedIndex = i;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+            if (select.value === option.value) {
+                this.appendStatusMessage(`Selected option (via index): ${option.text}`);
+                selectedOptionDetails = { text: option.text, value: option.value, reason: matchReason + " (via index)"};
+                matchFound = true;
+                break;
+            }
+          }
         }
       }
 
-      // If no match was found, try selecting the first non-placeholder option as fallback
-      if (!matchFound && select.options.length > 0) {
-        // Skip the first option if it looks like a placeholder
-        const startIndex =
-          select.options[0].value === "" ||
-          select.options[0].text.includes("Select") ||
-          select.options[0].text.includes("Choose")
-            ? 1
-            : 0;
-
-        if (startIndex < select.options.length) {
-          select.selectedIndex = startIndex;
-          select.dispatchEvent(new Event("change", { bubbles: true }));
-          this.appendStatusMessage(
-            `No matching option found, selected: ${select.options[startIndex].text}`
-          );
-          return true;
-        }
+      if (matchFound) {
+        debugLog("selectOptionByValueEnhanced: Selected option: '"+ selectedOptionDetails.text +"' (value: '"+selectedOptionDetails.value+"') for AI answer '"+aiAnswer+"'. Reason: "+selectedOptionDetails.reason);
+      } else {
+        debugLog("selectOptionByValueEnhanced: No matching option found for AI answer '"+aiAnswer+"'. Select field left unchanged.");
       }
 
       return matchFound;
     } catch (error) {
-      debugLog("Error in selectOptionByValueEnhanced:", error);
+      debugLog("Error in selectOptionByValueEnhanced for AI answer '"+aiAnswer+"':", error);
       return false;
     }
   }
@@ -3022,27 +3045,33 @@ class LeverJobAutomation {
           continue;
         }
 
-        // Construct field.options for getAnswer
+        // Construct field.options for getAnswer as an array of strings
         if (fieldInfo && fieldInfo.templateOptions && Array.isArray(fieldInfo.templateOptions)) {
-          field.options = fieldInfo.templateOptions.map(opt => ({
-            text: opt.text,
-            value: opt.optionId || opt.text // Use optionId if available, else text
-          }));
+          field.options = fieldInfo.templateOptions
+            .map(opt => (opt.optionId || opt.text || '').trim())
+            .filter(optString => optString);
         } else if (field.type === "select" && el.nodeName === "SELECT") {
           field.options = [...el.querySelectorAll("option")]
-            .filter(opt => opt.value && opt.text.trim() !== "") // Filter out empty/placeholder options
-            .map(opt => ({ text: opt.text.trim(), value: opt.value }));
-        } else if (field.type === "radio" || field.type === "checkbox") {
-          // For radio/checkboxes not from template, find associated labels
+            .map(opt => (opt.value || opt.textContent.trim()).trim())
+            .filter(optString => optString && !optString.toLowerCase().includes("select") && !optString.toLowerCase().includes("click here"));
+        } else if (field.type === "radio") {
           const inputs = Array.isArray(field.element) ? field.element : [field.element];
-          inputs.forEach(input => {
-            const labelElement = input.closest('label') || form.querySelector(`label[for="${input.id}"]`);
-            const text = labelElement ? labelElement.textContent.trim() : input.value;
-            // Ensure not to add duplicates if already populated from a group
-            if (!field.options.find(o => o.value === input.value)) {
-              field.options.push({ text: text, value: input.value });
-            }
-          });
+          field.options = inputs
+            .map(rad => (rad.value || rad.closest('label')?.textContent.trim() || '').trim())
+            .filter(optString => optString);
+        } else if (field.type === "checkbox") {
+          const inputs = Array.isArray(field.element) ? field.element : [field.element];
+           field.options = inputs
+            .map(chk => (chk.value || chk.closest('label')?.textContent.trim() || '').trim())
+            .filter(optString => optString);
+        }
+        // Ensure uniqueness for options if necessary (though less common for string arrays from values)
+        if (field.options && field.options.length > 0) {
+            field.options = [...new Set(field.options)];
+        }
+
+        if (field.type === 'select' || field.type === 'radio' || field.type === 'checkbox') {
+            debugLog("fillApplicationFields: Options prepared for AI for field '"+ field.label +"':", field.options);
         }
 
 
@@ -3923,34 +3952,54 @@ class LeverJobAutomation {
 
         // Decide what value to use for this radio group
         let selectedValue = null;
-        let answer = null; // Store AI answer
+        let answerString = null; // Store AI answer string for logging and comparison
 
         // First try to get answer from AI
         try {
           // Use getAnswer to get the appropriate value
-          answer = await this.getAnswer(
+          answerString = await this.getAnswer(
             questionText,
-            radioOptions,
+            radioOptions, // This is an array of strings
             profile
           );
-          debugLog("handleLeverRadioButtons: Question:", questionText, "AI Answer:", answer);
+          debugLog("handleLeverRadioButtons: Question:", questionText, "AI Answer (string):", answerString);
 
-          if (answer) { // Only proceed if AI provided an answer
+          if (answerString) { // Only proceed if AI provided an answer
+            const aiAnswerLower = answerString.toLowerCase();
             // Try to match the answer to one of the radio values or labels
-            for (const radio of radioInputs) {
-              const label = radio.closest("label");
-              const labelText = label ? label.textContent.trim() : "";
+            for (const radioBtn of radioInputs) { // Changed loop variable name for clarity
+              const labelEl = radioBtn.closest("label");
+              let labelText = "";
+              let matchReason = "";
 
-              if (
-                (radio.value && radio.value.toLowerCase() === answer.toLowerCase()) ||
-                (labelText && labelText.toLowerCase() === answer.toLowerCase()) ||
-                (labelText && labelText.toLowerCase().includes(answer.toLowerCase())) ||
-                (answer.toLowerCase().includes(labelText.toLowerCase()) && labelText) // Ensure labelText is not empty
-              ) {
-                selectedValue = radio.value;
-                debugLog("handleLeverRadioButtons: Selecting radio for '"+ questionText +"':", selectedValue, "Matched option label/value:", radio.value);
+              if (labelEl) {
+                const specificSpan = labelEl.querySelector('span.application-answer-alternative');
+                if (specificSpan) {
+                    labelText = specificSpan.textContent.trim();
+                } else {
+                    labelText = labelEl.textContent.trim();
+                }
+              }
+              const labelTextLower = labelText.toLowerCase();
+              const radioValueLower = radioBtn.value ? radioBtn.value.toLowerCase() : "";
+
+              if (radioValueLower && radioValueLower === aiAnswerLower) {
+                matchReason = "matched value attribute";
+              } else if (labelTextLower && labelTextLower === aiAnswerLower) {
+                matchReason = "matched label text";
+              } else if (labelTextLower && labelTextLower.includes(aiAnswerLower)) {
+                 matchReason = "AI answer included in label text";
+              } else if (radioValueLower && aiAnswerLower.includes(radioValueLower) && radioValueLower) {
+                 matchReason = "Radio value included in AI answer";
+              } else if (labelTextLower && aiAnswerLower.includes(labelTextLower) && labelTextLower) {
+                 matchReason = "Label text included in AI answer";
+              }
+
+              if (matchReason) {
+                selectedValue = radioBtn.value;
+                debugLog("handleLeverRadioButtons: Selecting radio for '"+ questionText +"'. AI answer '"+answerString+"' matched option with value '"+radioBtn.value+"' and label '"+labelText+"'. Reason: " + matchReason);
                 this.appendStatusMessage(
-                  `AI selected value: ${selectedValue} for question "${questionText}" based on answer: "${answer}"`
+                  `AI selected value: ${selectedValue} for question "${questionText}" based on answer: "${answerString}"`
                 );
                 break;
               }
