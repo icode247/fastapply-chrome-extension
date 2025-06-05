@@ -1743,42 +1743,42 @@ class LeverJobAutomation {
     try {
       this.appendStatusMessage(`Processing checkbox group: "${group.label}"`);
 
-      // Extract options from the group
-      const options = group.checkboxes.map((checkbox) => {
+      // Extract options from the group into {text, value} structure
+      const structuredOptions = group.checkboxes.map((checkbox) => {
         const label = checkbox.closest("label");
         const span = label?.querySelector("span");
-        return span
+        const text = span
           ? span.textContent.trim()
           : label?.textContent.trim() || checkbox.value;
+        return { text: text, value: checkbox.value };
       });
 
       // Skip empty groups
-      if (options.length === 0) {
+      if (structuredOptions.length === 0) {
         this.appendStatusMessage("No options found in group, skipping");
         return;
       }
 
-      this.appendStatusMessage(`Group options: ${options.join(", ")}`);
+      this.appendStatusMessage(`Group options for "${group.label}": ${structuredOptions.map(o => o.text).join(", ")}`);
 
       // For all other groups, ask AI what to select
       try {
-        // Get answer from AI
-        const answer = await this.getAnswer(group.label, options, profile);
-        debugLog("handleCheckboxGroup: Group:", group.label, "AI Answer:", answer);
+        // Get answer from AI, passing structuredOptions
+        const answerFromAI = await this.getAnswer(group.label, structuredOptions, profile);
+        debugLog("handleCheckboxGroup: Group:", group.label, "AI Answer:", answerFromAI);
 
-        if (answer) {
-          this.appendStatusMessage(`AI recommendation for "${group.label}": ${answer}`);
-          // Parse the answer - could be multiple selections
-          const selectedOptions = this.parseSelectedOptions(answer, options);
+        if (answerFromAI) {
+          this.appendStatusMessage(`AI recommendation for "${group.label}": ${answerFromAI}`);
+          // Parse the answer - could be multiple selections. Pass structuredOptions for parsing.
+          const textsToSelect = this.parseSelectedOptions(answerFromAI, structuredOptions);
 
-          if (selectedOptions.length > 0) {
-            for (const option of selectedOptions) {
-              // We will log inside checkSpecificOption after finding the checkboxLabel
-              await this.checkSpecificOption(group.checkboxes, option, group.label);
+          if (textsToSelect.length > 0) {
+            for (const textToSelect of textsToSelect) {
+              await this.checkSpecificOption(group.checkboxes, textToSelect, group.label);
             }
           } else {
             debugLog("handleCheckboxGroup: No specific option checked by AI for '"+group.label+"'. Group left untouched.");
-            this.appendStatusMessage(`No specific options from "${answer}" clearly matched available options for "${group.label}", leaving untouched.`);
+            this.appendStatusMessage(`No specific options from "${answerFromAI}" clearly matched available options for "${group.label}", leaving untouched.`);
           }
         } else {
           debugLog("handleCheckboxGroup: No specific option checked by AI for '"+group.label+"'. Group left untouched.");
@@ -1826,38 +1826,39 @@ class LeverJobAutomation {
   }
 
   // Parse selected options from AI answer
-  parseSelectedOptions(answer, availableOptions) {
-    if (!answer) return [];
+  parseSelectedOptions(answerFromAI, availableOptionsOnForm) { // availableOptionsOnForm is now array of {text, value}
+    if (!answerFromAI) return [];
 
-    // Check exact matches first
-    for (const option of availableOptions) {
-      if (option.toLowerCase() === answer.toLowerCase()) {
-        return [option];
+    const individualAnswers = answerFromAI.split(',').map(s => s.trim().toLowerCase());
+    const matchedDisplayTexts = new Set(); // Use a Set to store unique display texts
+
+    for (const optionOnForm of availableOptionsOnForm) { // optionOnForm is {text, value}
+      const optionTextLower = optionOnForm.text.toLowerCase();
+      const optionValueLower = optionOnForm.value ? optionOnForm.value.toLowerCase() : ""; // Handle cases where value might be null/undefined
+
+      for (const individualAnswer of individualAnswers) {
+        if (individualAnswer === optionTextLower || (optionValueLower && individualAnswer === optionValueLower)) {
+          matchedDisplayTexts.add(optionOnForm.text); // Add the display text to the set
+          break; // Found a match for this optionOnForm, move to the next
+        }
       }
     }
-
-    // Check if answer contains multiple options
-    const selectedOptions = [];
-    for (const option of availableOptions) {
-      if (answer.toLowerCase().includes(option.toLowerCase())) {
-        selectedOptions.push(option);
-      }
-    }
-
-    return selectedOptions;
+    return Array.from(matchedDisplayTexts); // Convert Set to array
   }
 
   // Check a specific option in a checkbox group
-  async checkSpecificOption(checkboxes, optionText, groupLabelForDebug = "") { // Added groupLabelForDebug
+  async checkSpecificOption(checkboxes, optionTextFromParse, groupLabelForDebug = "") {
     for (const checkbox of checkboxes) {
       const label = checkbox.closest("label");
       const span = label?.querySelector("span");
       const checkboxLabel = span
         ? span.textContent.trim()
         : label?.textContent.trim() || checkbox.value;
+      const checkboxValue = checkbox.value;
 
-      if (checkboxLabel.toLowerCase() === optionText.toLowerCase()) {
-        debugLog("handleCheckboxGroup: Checking option '"+ checkboxLabel +"' for group '"+groupLabelForDebug+"'");
+      if (checkboxLabel.toLowerCase() === optionTextFromParse.toLowerCase() ||
+          (checkboxValue && checkboxValue.toLowerCase() === optionTextFromParse.toLowerCase())) {
+        debugLog("handleCheckboxGroup: Checking option '"+ checkboxLabel +"' (value: '"+checkboxValue+"') for group '"+groupLabelForDebug+"' based on AI answer '"+optionTextFromParse+"'");
         this.appendStatusMessage(`Selecting option: "${checkboxLabel}"`);
 
         // Scroll to the checkbox
@@ -2352,9 +2353,13 @@ class LeverJobAutomation {
               // Map each field to its corresponding input name
               template.fields.forEach((field, index) => {
                 const fieldName = `cards[${cardId}][field${index}]`;
-                fieldQuestions[fieldName] = field.text;
+                fieldQuestions[fieldName] = {
+                  question: field.text,
+                  templateOptions: field.options || null,
+                  type: field.type,
+                };
                 this.appendStatusMessage(
-                  `Found template question: "${field.text}"`
+                  `Found template question: "${field.text}", Type: ${field.type}, Options: ${field.options ? field.options.length : 0}`
                 );
               });
             }
@@ -2379,15 +2384,19 @@ class LeverJobAutomation {
           let questionText = textEl.textContent.trim();
           questionText = questionText.replace(/✱$/, "").trim();
 
-          // Find the corresponding input/textarea
+          // Find the corresponding input/textarea/select
           const inputEl = questionEl.querySelector(
-            'input:not([type="hidden"]), textarea'
+            'input:not([type="hidden"]), textarea, select'
           );
 
-          if (inputEl && questionText) {
-            fieldQuestions[inputEl.name] = questionText;
+          if (inputEl && questionText && !fieldQuestions[inputEl.name] /* Only add if not already from template */) {
+            fieldQuestions[inputEl.name] = {
+              question: questionText,
+              templateOptions: null, // No template options for these
+              type: inputEl.type || inputEl.tagName.toLowerCase(),
+            };
             this.appendStatusMessage(
-              `Found visible question: "${questionText}"`
+              `Found visible question: "${questionText}", Type: ${inputEl.type || inputEl.tagName.toLowerCase()}`
             );
           }
         } catch (error) {
@@ -2409,33 +2418,39 @@ class LeverJobAutomation {
    * Enhanced method to match field names to their questions
    * @param {HTMLElement} element - The form field element
    * @param {Object} fieldQuestions - Mapping of field names to questions
-   * @returns {String} - The question text or null if not found
+   * @returns {Object | null} - The field info object or null if not found
    */
   getQuestionForField(element, fieldQuestions) {
     if (!element || !element.name) return null;
 
     // Direct lookup by field name
     if (fieldQuestions[element.name]) {
-      return fieldQuestions[element.name];
+      return fieldQuestions[element.name]; // Returns the object { question, templateOptions, type }
     }
 
     // For fields with no direct match, try the closest application-question container
+    // This part might become less relevant if templates are comprehensive
     const questionContainer = element.closest(".application-question");
     if (questionContainer) {
       const labelEl = questionContainer.querySelector(".application-label");
       const textEl = labelEl?.querySelector(".text") || labelEl;
 
       if (textEl) {
-        // Get text without the required asterisk
         let questionText = textEl.textContent.trim();
         questionText = questionText.replace(/✱$/, "").trim();
+        const inputEl = questionContainer.querySelector('input:not([type="hidden"]), textarea, select');
+
 
         if (questionText) {
-          return questionText;
+          // Return a similar structured object for consistency, though templateOptions will be null
+          return {
+            question: questionText,
+            templateOptions: null,
+            type: inputEl ? (inputEl.type || inputEl.tagName.toLowerCase()) : (element.type || element.tagName.toLowerCase()),
+          };
         }
       }
     }
-
     return null;
   }
 
@@ -2474,7 +2489,12 @@ class LeverJobAutomation {
         let labelText = "";
 
         if (labelEl) {
-          labelText = labelEl.textContent.trim().toLowerCase();
+          const specificSpan = labelEl.querySelector('span.application-answer-alternative');
+          if (specificSpan) {
+              labelText = specificSpan.textContent.trim().toLowerCase();
+          } else {
+              labelText = labelEl.textContent.trim().toLowerCase();
+          }
         } else {
           // Try to find text near the radio button
           const parentEl = radioBtn.parentElement;
@@ -2940,11 +2960,14 @@ class LeverJobAutomation {
         };
 
         // Get field label/question text
-        const questionText = this.getQuestionForField(el, fieldQuestions);
-        if (questionText) {
-          field.label = questionText;
+        const fieldInfo = this.getQuestionForField(el, fieldQuestions);
+
+        if (fieldInfo) {
+          field.label = fieldInfo.question;
+          // Use template type if available, otherwise fallback to DOM scraping
+          field.type = fieldInfo.type || el.type || el.tagName.toLowerCase();
         } else {
-          // Standard label detection as fallback
+          // Fallback to older label detection if fieldInfo is not found (should be rare)
           const ariaLabelledBy = el.getAttribute("aria-labelledby");
           const labelEl = ariaLabelledBy
             ? document.getElementById(ariaLabelledBy)
@@ -2980,87 +3003,51 @@ class LeverJobAutomation {
           }
         }
 
+        field.type = fieldInfo?.type || el.type || el.tagName.toLowerCase();
+
+
         // Check if required
         field.required =
           field.required ||
           el.hasAttribute("required") ||
           el.getAttribute("aria-required") === "true" ||
-          field.label.includes("*") ||
+          (field.label && field.label.includes("*")) ||
           el.closest(".required-field") !== null;
 
         // Clean up label by removing required asterisk
-        field.label = field.label.replace(/✱$/, "").trim();
-        if (!field.label) {
-          debugLog("No label found for field, skipping");
+        if(field.label) field.label = field.label.replace(/✱$/, "").trim();
+
+        if (!field.label && field.type !== 'radio' && field.type !== 'checkbox') { // Radio/checkbox groups might not have a single top-level label
+          debugLog("No label found for field, skipping unless it's a radio/checkbox group", el);
           continue;
         }
 
-        // Determine field type and options
-        switch (el.nodeName) {
-          case "INPUT":
-          case "TEXTAREA":
-            field.type = el.type;
-            // Handle custom dropdowns
-            if (
-              el.nodeName === "INPUT" &&
-              (el.getAttribute("role") === "combobox" ||
-                el.parentElement?.querySelector(".dropdown-icon"))
-            ) {
-              field.type = "select";
-              // Extract options
-              const selectContainer =
-                el.closest('div[data-input-type="select"]') ||
-                el.closest(".select-container") ||
-                el.parentElement;
-              if (selectContainer) {
-                const optionElements = selectContainer.querySelectorAll(
-                  "dialog ul li, .dropdown-options li, .options li"
-                );
-                if (optionElements.length) {
-                  field.options = [...optionElements].map((el) =>
-                    el.textContent.trim()
-                  );
-                }
-              }
+        // Construct field.options for getAnswer
+        if (fieldInfo && fieldInfo.templateOptions && Array.isArray(fieldInfo.templateOptions)) {
+          field.options = fieldInfo.templateOptions.map(opt => ({
+            text: opt.text,
+            value: opt.optionId || opt.text // Use optionId if available, else text
+          }));
+        } else if (field.type === "select" && el.nodeName === "SELECT") {
+          field.options = [...el.querySelectorAll("option")]
+            .filter(opt => opt.value && opt.text.trim() !== "") // Filter out empty/placeholder options
+            .map(opt => ({ text: opt.text.trim(), value: opt.value }));
+        } else if (field.type === "radio" || field.type === "checkbox") {
+          // For radio/checkboxes not from template, find associated labels
+          const inputs = Array.isArray(field.element) ? field.element : [field.element];
+          inputs.forEach(input => {
+            const labelElement = input.closest('label') || form.querySelector(`label[for="${input.id}"]`);
+            const text = labelElement ? labelElement.textContent.trim() : input.value;
+            // Ensure not to add duplicates if already populated from a group
+            if (!field.options.find(o => o.value === input.value)) {
+              field.options.push({ text: text, value: input.value });
             }
-            break;
-
-          case "SELECT":
-            field.type = "select";
-            field.options = [...el.querySelectorAll("option")].map((opt) =>
-              opt.textContent.trim()
-            );
-            break;
-
-          case "DIV":
-          case "FIELDSET":
-            // Handle radio and checkbox groups
-            const inputs = el.querySelectorAll("input");
-            if (inputs.length > 0) {
-              field.type = inputs[0].type;
-              field.element = [...inputs];
-
-              // Get options from labels
-              if (el.nodeName === "DIV") {
-                field.options = [...el.querySelectorAll("label")].map((l) =>
-                  l.textContent.trim()
-                );
-              } else {
-                field.options = [...inputs].map(
-                  (input) =>
-                    input.closest("label")?.textContent.trim() ||
-                    document
-                      .querySelector(`label[for="${input.id}"]`)
-                      ?.textContent.trim() ||
-                    ""
-                );
-              }
-            }
-            break;
+          });
         }
 
+
         this.appendStatusMessage(
-          `Processing field: ${field.label} (${field.type})`
+          `Processing field: ${field.label || field.type} (${field.type})`
         );
 
         // Get value for the field - PRIORITIZE USING getAnswer
