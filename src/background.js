@@ -185,12 +185,13 @@ const PlatformRouter = {
     if (
       this.activeHandler &&
       typeof this.activeHandler.cleanup === "function" &&
-      this.activePlatform !== PLATFORMS.EXTERNAL // Don't clean up external handler
+      this.activePlatform !== PLATFORMS.EXTERNAL 
     ) {
       await this.activeHandler.cleanup();
     }
-
+    console.log(platform)
     const handler = this.handlers[platform];
+    console.log(handler)
     if (!handler) {
       throw new Error(`Unsupported platform: ${platform}`);
     }
@@ -364,3 +365,5 @@ const PlatformRouter = {
 PlatformRouter.init();
 
 export { PlatformRouter };
+
+//Unsupported platform: ashby

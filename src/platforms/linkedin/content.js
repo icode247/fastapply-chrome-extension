@@ -485,6 +485,7 @@ class LinkedInJobApply {
       "Past month": "r2592000",
       "Past week": "r604800",
       "Past 24 hours": "r86400",
+      "Few Minutes Ago": "r3600",
     };
 
     if (preferences.datePosted) {

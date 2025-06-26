@@ -823,6 +823,8 @@ class LeverJobAutomation {
    */
   processSendCvTaskData(data) {
     try {
+      debugLog("processSendCvTaskData: Received data with profile:", data.profile);
+      debugLog("processSendCvTaskData: Full data object:", data);
       debugLog("Processing send CV task data:", data);
 
       if (!data) {
@@ -1758,88 +1760,38 @@ class LeverJobAutomation {
 
       this.appendStatusMessage(`Group options: ${options.join(", ")}`);
 
-      // Special case: If this is an EEO/demographic question with "Prefer not to say"
-      const isDemographic = this.isDemographicQuestion(group.label);
-      const hasDeclineOption = options.some(
-        (opt) =>
-          opt.toLowerCase().includes("prefer not") ||
-          opt.toLowerCase().includes("decline to") ||
-          opt.toLowerCase().includes("do not wish to")
-      );
-
-      if (isDemographic && hasDeclineOption) {
-        // For demographic questions, select "Prefer not to say" option
-        const declineOption = options.find(
-          (opt) =>
-            opt.toLowerCase().includes("prefer not") ||
-            opt.toLowerCase().includes("decline to") ||
-            opt.toLowerCase().includes("do not wish to")
-        );
-
-        if (declineOption) {
-          this.appendStatusMessage(
-            `Demographic question detected, selecting "${declineOption}"`
-          );
-          await this.checkSpecificOption(group.checkboxes, declineOption);
-          return;
-        }
-      }
-
       // For all other groups, ask AI what to select
       try {
         // Get answer from AI
         const answer = await this.getAnswer(group.label, options, profile);
-        this.appendStatusMessage(`AI recommendation: ${answer}`);
+        debugLog("handleCheckboxGroup: Group:", group.label, "AI Answer:", answer);
 
-        // Parse the answer - could be multiple selections
-        const selectedOptions = this.parseSelectedOptions(answer, options);
+        if (answer) {
+          this.appendStatusMessage(`AI recommendation for "${group.label}": ${answer}`);
+          // Parse the answer - could be multiple selections
+          const selectedOptions = this.parseSelectedOptions(answer, options);
 
-        if (selectedOptions.length > 0) {
-          for (const option of selectedOptions) {
-            await this.checkSpecificOption(group.checkboxes, option);
+          if (selectedOptions.length > 0) {
+            for (const option of selectedOptions) {
+              // We will log inside checkSpecificOption after finding the checkboxLabel
+              await this.checkSpecificOption(group.checkboxes, option, group.label);
+            }
+          } else {
+            debugLog("handleCheckboxGroup: No specific option checked by AI for '"+group.label+"'. Group left untouched.");
+            this.appendStatusMessage(`No specific options from "${answer}" clearly matched available options for "${group.label}", leaving untouched.`);
           }
         } else {
-          this.appendStatusMessage("No specific options selected by AI");
+          debugLog("handleCheckboxGroup: No specific option checked by AI for '"+group.label+"'. Group left untouched.");
+          this.appendStatusMessage(`AI did not provide an answer for checkbox group "${group.label}", leaving untouched.`);
         }
       } catch (error) {
         debugLog(
-          `Error getting AI answer for checkbox group: ${error.message}`
+          `Error getting AI answer for checkbox group "${group.label}": ${error.message}`
         );
-
-        // Fallback logic for specific group types
-        if (isDemographic) {
-          // For demographic questions, try to find a "prefer not to say" option
-          const preferOption = options.find(
-            (opt) =>
-              opt.toLowerCase().includes("prefer not") ||
-              opt.toLowerCase().includes("decline")
-          );
-
-          if (preferOption) {
-            this.appendStatusMessage(
-              `Fallback: Selecting "${preferOption}" for demographic question`
-            );
-            await this.checkSpecificOption(group.checkboxes, preferOption);
-          }
-        } else if (group.label.toLowerCase().includes("pronoun")) {
-          // For pronouns, use profile gender if available
-          if (profile.gender) {
-            const genderMap = {
-              male: "He/him",
-              female: "She/her",
-              "non-binary": "They/them",
-            };
-
-            const pronounOption = genderMap[profile.gender.toLowerCase()];
-            if (pronounOption && options.includes(pronounOption)) {
-              this.appendStatusMessage(
-                `Fallback: Selecting "${pronounOption}" based on profile gender`
-              );
-              await this.checkSpecificOption(group.checkboxes, pronounOption);
-            }
-          }
-        }
-        // Leave other groups unchecked by default
+        this.appendStatusMessage(
+          `Error getting AI answer for checkbox group "${group.label}", leaving untouched. Error: ${error.message}`
+        );
+        // Do not apply any fallback, leave untouched
       }
     } catch (error) {
       debugLog(
@@ -1896,7 +1848,7 @@ class LeverJobAutomation {
   }
 
   // Check a specific option in a checkbox group
-  async checkSpecificOption(checkboxes, optionText) {
+  async checkSpecificOption(checkboxes, optionText, groupLabelForDebug = "") { // Added groupLabelForDebug
     for (const checkbox of checkboxes) {
       const label = checkbox.closest("label");
       const span = label?.querySelector("span");
@@ -1905,6 +1857,7 @@ class LeverJobAutomation {
         : label?.textContent.trim() || checkbox.value;
 
       if (checkboxLabel.toLowerCase() === optionText.toLowerCase()) {
+        debugLog("handleCheckboxGroup: Checking option '"+ checkboxLabel +"' for group '"+groupLabelForDebug+"'");
         this.appendStatusMessage(`Selecting option: "${checkboxLabel}"`);
 
         // Scroll to the checkbox
@@ -1997,23 +1950,13 @@ class LeverJobAutomation {
           `Error getting AI answer for individual checkbox: ${error.message}`
         );
 
-        // Conservative fallback: only check legal requirements
-        const checkboxLower = checkboxText.toLowerCase();
-        const isLegalRequirement =
-          (checkboxLower.includes("terms") &&
-            checkboxLower.includes("conditions")) ||
-          (checkboxLower.includes("privacy") &&
-            checkboxLower.includes("policy"));
-
-        if (isLegalRequirement) {
-          this.appendStatusMessage(
-            "Fallback: Checking legal requirement checkbox"
-          );
-          await this.checkIndividualCheckbox(checkbox, label);
-        }
+        // No fallback if AI doesn't provide an answer, unless it's required (handled by isRequired logic)
+        this.appendStatusMessage(
+          `AI did not provide a clear recommendation for "${checkboxText}", leaving as is (unless required).`
+        );
       }
     } catch (error) {
-      debugLog(`Error handling individual checkbox: ${error.message}`);
+      debugLog(`Error handling individual checkbox "${checkboxText}": ${error.message}`);
     }
   }
 
@@ -2336,81 +2279,6 @@ class LeverJobAutomation {
     }
 
     return false;
-  }
-
-  /**
-   * Generate a generic answer based on the question content
-   */
-  generateGenericAnswer(question) {
-    const questionLower = question.toLowerCase();
-
-    // Generic answer based on question type
-    if (
-      questionLower.includes("experience") ||
-      questionLower.includes("background") ||
-      questionLower.includes("tell us about yourself")
-    ) {
-      return "I have extensive experience in my field with a track record of delivering results. My background includes working with diverse teams and stakeholders to achieve business objectives. I continually focus on professional development to stay current with industry trends and best practices.";
-    }
-
-    if (
-      questionLower.includes("why") ||
-      questionLower.includes("interested") ||
-      questionLower.includes("passion")
-    ) {
-      return "I'm particularly interested in this opportunity because of your company's reputation for innovation and commitment to quality. The position aligns well with my career goals and would allow me to leverage my skills while continuing to grow professionally. I'm excited about the potential to contribute to your team.";
-    }
-
-    if (
-      questionLower.includes("strengths") ||
-      questionLower.includes("skills") ||
-      questionLower.includes("qualify")
-    ) {
-      return "My key strengths include strong analytical skills, effective communication, and the ability to adapt quickly to new challenges. I excel at problem-solving and collaborating with cross-functional teams to achieve results. My technical expertise combined with my interpersonal skills make me well-suited for this role.";
-    }
-
-    if (
-      questionLower.includes("weakness") ||
-      questionLower.includes("improve") ||
-      questionLower.includes("development")
-    ) {
-      return "I continuously work on improving my skills in public speaking. I've been taking courses and seeking opportunities to present to groups to build confidence in this area. I believe in honest self-assessment and actively pursue growth in areas where I can improve.";
-    }
-
-    if (
-      questionLower.includes("challenge") ||
-      questionLower.includes("difficult") ||
-      questionLower.includes("obstacle")
-    ) {
-      return "In a recent project, I faced significant time constraints while managing multiple priorities. I addressed this by implementing a structured planning system, clear communication with stakeholders, and breaking the project into manageable milestones. This approach allowed me to deliver successful results despite the challenges.";
-    }
-
-    if (
-      questionLower.includes("achievement") ||
-      questionLower.includes("proud") ||
-      questionLower.includes("accomplishment")
-    ) {
-      return "One of my key achievements was leading a cross-functional project that improved operational efficiency by 30%. This required coordinating multiple teams, overcoming technical challenges, and staying focused on business objectives. The success of this initiative was recognized by senior management and implemented across the organization.";
-    }
-
-    if (
-      questionLower.includes("team") ||
-      questionLower.includes("collaborate") ||
-      questionLower.includes("work with others")
-    ) {
-      return "I thrive in collaborative environments and enjoy working closely with diverse teams. I value different perspectives and believe the best solutions come from open communication and mutual respect. I'm experienced in both contributing as a team member and taking leadership roles when appropriate.";
-    }
-
-    if (
-      questionLower.includes("values") ||
-      questionLower.includes("culture") ||
-      questionLower.includes("environment")
-    ) {
-      return "I value environments that promote transparency, continuous learning, and mutual respect. I believe in maintaining high ethical standards and taking ownership of my work. I'm most productive in cultures that balance collaboration with individual initiative and provide opportunities for professional growth.";
-    }
-
-    // Default generic answer for other question types
-    return "I approach this with a combination of strategic thinking and practical experience. My background has prepared me well for handling such situations effectively. I'm confident that my skills and approach would be valuable in this context, and I'm enthusiastic about the opportunity to contribute in this area.";
   }
 
   /**
@@ -2979,6 +2847,416 @@ class LeverJobAutomation {
   /**
    * Modified fillApplicationFields function with enhanced radio and select handling
    */
+  // async fillApplicationFields(form, profile) {
+  //   try {
+  //     this.appendStatusMessage("Filling form fields...");
+
+  //     // Extract all questions from the form first
+  //     const fieldQuestions = this.extractLeverFormQuestions(form);
+
+  //     // Create a mapping for basic profile fields only (for simple fields)
+
+  //     const basicProfileFields = {
+  //       "first name": profile.firstName,
+  //       "last name": profile.lastName,
+  //       "full name": `${profile.firstName} ${profile.lastName}`,
+  //       name: `${profile.firstName} ${profile.lastName}`,
+  //       email: profile.email,
+  //       phone: profile.phone || profile.phoneNumber,
+  //       linkedin: profile.linkedIn || profile.linkedinUrl,
+  //       github: profile.github || profile.githubUrl,
+  //       website: profile.website || profile.websiteUrl,
+  //       location: profile.currentCity || profile.city || profile.location,
+  //       address: profile.streetAddress,
+  //       city:
+  //         profile.city ||
+  //         (profile.currentCity ? profile.currentCity.split(",")[0].trim() : ""),
+  //     };
+
+  //     // Field selector for form elements
+  //     const FIELDS_SELECTOR =
+  //       'fieldset[aria-labelledby], div[role="group"][aria-labelledby], ' +
+  //       'input[aria-labelledby]:not([aria-hidden="true"],[type="file"]), ' +
+  //       'textarea[aria-labelledby], input[texts]:not([aria-hidden="true"],[type="file"]), ' +
+  //       'input[placeholder][inputmode="tel"]:not([aria-hidden="true"],[type="file"]), ' +
+  //       'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], ' +
+  //       "textarea, select, div.select-container, " +
+  //       'fieldset:has(input[type="radio"]), fieldset:has(input[type="checkbox"]), ' +
+  //       'div:has(input[type="radio"]), div:has(input[type="checkbox"])';
+
+  //     // Gather all form fields
+  //     const formElements = [...form.querySelectorAll(FIELDS_SELECTOR)];
+  //     debugLog(`Found ${formElements.length} form fields to process`);
+
+  //     // Process each form element
+  //     for (const el of formElements) {
+  //       // Skip location autocomplete (handled separately)
+  //       if (
+  //         el.classList.contains("location-input") ||
+  //         el.id === "location-input" ||
+  //         (el.name === "location" &&
+  //           el.parentElement.querySelector('input[name="selectedLocation"]'))
+  //       ) {
+  //         this.appendStatusMessage(
+  //           "Found location field - using simplified approach"
+  //         );
+  //         let locationValue =
+  //           profile.currentCity || profile.city || profile.location;
+
+  //         // First try the simple approach
+  //         const simpleApproachWorked = await this.handleLocationAutocomplete(
+  //           el,
+  //           locationValue
+  //         );
+
+  //         // If it didn't work, try the alternative approach
+  //         if (!simpleApproachWorked || !el.value) {
+  //           this.appendStatusMessage(
+  //             "Simple approach failed, trying alternative method"
+  //           );
+  //           await this.handleLeverLocation(form, profile);
+  //         }
+
+  //         continue;
+  //       }
+
+  //       // Skip hidden elements
+  //       if (
+  //         el.style.display === "none" ||
+  //         el.offsetParent === null ||
+  //         el.style.visibility === "hidden" ||
+  //         el.getAttribute("aria-hidden") === "true"
+  //       ) {
+  //         continue;
+  //       }
+
+  //       // Initialize field info
+  //       const field = {
+  //         element: el,
+  //         type: "",
+  //         label: "",
+  //         required: false,
+  //         options: [],
+  //       };
+
+  //       // Get field label/question text
+  //       const questionText = this.getQuestionForField(el, fieldQuestions);
+  //       if (questionText) {
+  //         field.label = questionText;
+  //       } else {
+  //         // Standard label detection as fallback
+  //         const ariaLabelledBy = el.getAttribute("aria-labelledby");
+  //         const labelEl = ariaLabelledBy
+  //           ? document.getElementById(ariaLabelledBy)
+  //           : el.closest("label") ||
+  //             document.querySelector(`label[for="${el.id}"]`) ||
+  //             el.parentElement?.querySelector("label");
+
+  //         if (labelEl) {
+  //           field.label = labelEl.textContent.trim();
+  //           field.required = this.isRequired(labelEl);
+  //         } else {
+  //           // Try other ways to get the label
+  //           const container =
+  //             el.closest(".application-field") || el.parentElement;
+  //           if (container) {
+  //             const labelText = container
+  //               .querySelector("label, .field-label, .label")
+  //               ?.textContent.trim();
+  //             if (labelText) {
+  //               field.label = labelText;
+  //             }
+  //           }
+
+  //           // Fallback label sources
+  //           if (!field.label) {
+  //             field.label =
+  //               el.getAttribute("placeholder") ||
+  //               el.getAttribute("aria-label") ||
+  //               el.getAttribute("name") ||
+  //               el.id ||
+  //               "";
+  //           }
+  //         }
+  //       }
+
+  //       // Check if required
+  //       field.required =
+  //         field.required ||
+  //         el.hasAttribute("required") ||
+  //         el.getAttribute("aria-required") === "true" ||
+  //         field.label.includes("*") ||
+  //         el.closest(".required-field") !== null;
+
+  //       // Clean up label by removing required asterisk
+  //       field.label = field.label.replace(/✱$/, "").trim();
+  //       if (!field.label) {
+  //         debugLog("No label found for field, skipping");
+  //         continue;
+  //       }
+
+  //       // Determine field type and options
+  //       switch (el.nodeName) {
+  //         case "INPUT":
+  //         case "TEXTAREA":
+  //           field.type = el.type;
+  //           // Handle custom dropdowns
+  //           if (
+  //             el.nodeName === "INPUT" &&
+  //             (el.getAttribute("role") === "combobox" ||
+  //               el.parentElement?.querySelector(".dropdown-icon"))
+  //           ) {
+  //             field.type = "select";
+  //             // Extract options
+  //             const selectContainer =
+  //               el.closest('div[data-input-type="select"]') ||
+  //               el.closest(".select-container") ||
+  //               el.parentElement;
+  //             if (selectContainer) {
+  //               const optionElements = selectContainer.querySelectorAll(
+  //                 "dialog ul li, .dropdown-options li, .options li"
+  //               );
+  //               if (optionElements.length) {
+  //                 field.options = [...optionElements].map((el) =>
+  //                   el.textContent.trim()
+  //                 );
+  //               }
+  //             }
+  //           }
+  //           break;
+
+  //         case "SELECT":
+  //           field.type = "select";
+  //           field.options = [...el.querySelectorAll("option")].map((opt) =>
+  //             opt.textContent.trim()
+  //           );
+  //           break;
+
+  //         case "DIV":
+  //         case "FIELDSET":
+  //           // Handle radio and checkbox groups
+  //           const inputs = el.querySelectorAll("input");
+  //           if (inputs.length > 0) {
+  //             field.type = inputs[0].type;
+  //             field.element = [...inputs];
+
+  //             // Get options from labels
+  //             if (el.nodeName === "DIV") {
+  //               field.options = [...el.querySelectorAll("label")].map((l) =>
+  //                 l.textContent.trim()
+  //               );
+  //             } else {
+  //               field.options = [...inputs].map(
+  //                 (input) =>
+  //                   input.closest("label")?.textContent.trim() ||
+  //                   document
+  //                     .querySelector(`label[for="${input.id}"]`)
+  //                     ?.textContent.trim() ||
+  //                   ""
+  //               );
+  //             }
+  //           }
+  //           break;
+  //       }
+
+  //       this.appendStatusMessage(
+  //         `Processing field: ${field.label} (${field.type})`
+  //       );
+
+  //       // Get value for the field - PRIORITIZE USING getAnswer
+  //       let value = null;
+
+  //       // For critical profile fields, use direct mapping
+  //       const labelLower = field.label.toLowerCase();
+  //       if (basicProfileFields[labelLower]) {
+  //         value = basicProfileFields[labelLower];
+  //         debugLog(
+  //           `Using direct profile field mapping for ${field.label}: ${value}`
+  //         );
+  //       }
+  //       // For contact info patterns, match without using getAnswer
+  //       else if (
+  //         this.matchesAny(labelLower, [
+  //           "first name",
+  //           "given name",
+  //           "firstname",
+  //         ]) ||
+  //         (labelLower.includes("first") && labelLower.includes("name"))
+  //       ) {
+  //         value = profile.firstName;
+  //       } else if (
+  //         this.matchesAny(labelLower, ["last name", "surname", "lastname"]) ||
+  //         (labelLower.includes("last") && labelLower.includes("name"))
+  //       ) {
+  //         value = profile.lastName;
+  //       } else if (
+  //         this.matchesAny(labelLower, ["email", "e-mail", "electronic mail"]) ||
+  //         labelLower.includes("email")
+  //       ) {
+  //         value = profile.email;
+  //       } else if (
+  //         this.matchesAny(labelLower, [
+  //           "phone",
+  //           "telephone",
+  //           "mobile",
+  //           "cell",
+  //         ]) ||
+  //         labelLower.includes("phone") ||
+  //         labelLower.includes("tel")
+  //       ) {
+  //         value = profile.phone || profile.phoneNumber;
+  //       }
+  //       // Skip resume upload fields
+  //       else if (labelLower.includes("resume") || labelLower.includes("cv")) {
+  //         debugLog("Skipping resume field - handled separately");
+  //         continue;
+  //       }
+  //       // For all other fields (especially text inputs and textareas), use getAnswer
+  //       else {
+  //         try {
+  //           // Use getAnswer for most fields, passing the field label, options array, and profile
+  //           debugLog(`Getting AI answer for: "${field.label}"`);
+  //           value = await this.getAnswer(field.label, field.options, profile);
+  //           debugLog(
+  //             `Received answer: ${
+  //               value
+  //                 ? value.length > 50
+  //                   ? value.substring(0, 50) + "..."
+  //                   : value
+  //                 : "null"
+  //             }`
+  //           );
+  //         } catch (error) {
+  //           debugLog(`Error getting AI answer: ${error.message}`);
+  //           // If getAnswer fails, fall back to generateGenericAnswer
+  //           if (
+  //             el.nodeName === "TEXTAREA" ||
+  //             (el.nodeName === "INPUT" && el.type === "text")
+  //           ) {
+  //             value = this.generateGenericAnswer(field.label);
+  //           }
+  //         }
+  //       }
+
+  //       // Skip if no value to fill
+  //       debugLog("fillApplicationFields: For field label '"+ field.label +"', AI value received:", value, "Field Type:", field.type);
+  //       if (value === null || value === undefined || value === "") {
+  //         debugLog("fillApplicationFields: No valid AI value for '"+ field.label +"'. Field will be skipped.");
+  //         debugLog(`No value (null, undefined, or empty) found for field: "${field.label}", skipping`);
+  //         continue;
+  //       }
+
+  //       this.appendStatusMessage(`Filling field: ${field.label} with value`);
+  //       debugLog("fillApplicationFields: Attempting to fill '"+ field.label +"' of type '"+field.type+"' with value:", value);
+
+  //       // Fill the field based on its type
+  //       await this.wait(100);
+
+  //       try {
+  //         if (field.type === "radio" && Array.isArray(field.element)) {
+  //           debugLog("fillApplicationFields: Attempting to fill '"+ field.label +"' of type '"+field.type+"' with value:", value);
+  //           await this.handleRadioButtonSelection(field.element, value);
+  //         } else if (
+  //           field.type === "checkbox" &&
+  //           Array.isArray(field.element)
+  //         ) {
+  //           debugLog("fillApplicationFields: Attempting to fill '"+ field.label +"' of type '"+field.type+"' with value:", value);
+  //           for (const el of field.element) {
+  //             this.scrollToTargetAdjusted(el, 100);
+  //             const labelText =
+  //               el.closest("label")?.textContent.trim() ||
+  //               document
+  //                 .querySelector(`label[for="${el.id}"]`)
+  //                 ?.textContent.trim() ||
+  //               el.parentNode?.parentNode?.textContent.trim() ||
+  //               "";
+
+  //             if (
+  //               labelText === value ||
+  //               labelText.toLowerCase() === value.toLowerCase() ||
+  //               (Array.isArray(value) && value.includes(labelText))
+  //             ) {
+  //               // Check the box
+  //               el.click();
+  //               await this.wait(300);
+
+  //               if (!el.checked) {
+  //                 const labelEl =
+  //                   el.closest("label") ||
+  //                   document.querySelector(`label[for="${el.id}"]`);
+  //                 if (labelEl) {
+  //                   labelEl.click();
+  //                   await this.wait(300);
+  //                 }
+  //               }
+
+  //               if (!el.checked) {
+  //                 el.checked = true;
+  //                 el.dispatchEvent(new Event("change", { bubbles: true }));
+  //               }
+  //             }
+  //           }
+  //         } else if (field.type === "select") {
+  //           await this.handleSelectFieldSelection(field.element, value);
+  //         } else {
+  //           debugLog("fillApplicationFields: Attempting to fill '"+ field.label +"' of type '"+field.type+"' with value:", value);
+  //           await this.setAdvancedInputValue(field.element, value);
+  //         }
+  //       } catch (inputError) {
+  //         debugLog(`Error filling field ${field.label}:`, inputError);
+  //       }
+  //     }
+
+  //     // Special handling for phone fields with country code
+  //     if (profile.phone && profile.phoneCountryCode) {
+  //       const phoneInput = form.querySelector(
+  //         'input[type="tel"], input[name="phone"], input[placeholder*="phone"]'
+  //       );
+  //       if (phoneInput) {
+  //         const countryCodeElement =
+  //           phoneInput.parentElement.querySelector('[role="combobox"]');
+  //         if (countryCodeElement) {
+  //           countryCodeElement.click();
+  //           await this.wait(500);
+
+  //           const countryItems = document.querySelectorAll(
+  //             ".iti__dropdown-content li.iti__country, .country-code-dropdown li"
+  //           );
+  //           for (const item of countryItems) {
+  //             const dialCode = item.querySelector(
+  //               ".iti__dial-code, .dial-code"
+  //             )?.textContent;
+  //             if (dialCode === profile.phoneCountryCode) {
+  //               item.click();
+  //               break;
+  //             }
+  //           }
+
+  //           const phoneValueWithoutCountry = profile.phone.replace(
+  //             profile.phoneCountryCode,
+  //             ""
+  //           );
+  //           await this.setAdvancedInputValue(
+  //             phoneInput,
+  //             phoneValueWithoutCountry
+  //           );
+  //         }
+  //       }
+  //     }
+
+  //     // Handle GDPR/consent checkboxes
+  //     await this.handleRequiredCheckboxes(form);
+  //   } catch (error) {
+  //     debugLog("Error filling application fields:", error);
+  //     this.appendStatusMessage(
+  //       `Warning: Some fields may not have been filled correctly - ${error.message}`
+  //     );
+  //   }
+  // }
+
+  /**
+   * Modified fillApplicationFields function with radio and select handling removed
+   */
   async fillApplicationFields(form, profile) {
     try {
       this.appendStatusMessage("Filling form fields...");
@@ -3005,16 +3283,13 @@ class LeverJobAutomation {
           (profile.currentCity ? profile.currentCity.split(",")[0].trim() : ""),
       };
 
-      // Field selector for form elements
+      // Field selector for form elements (excluding radio, checkbox, and select)
       const FIELDS_SELECTOR =
-        'fieldset[aria-labelledby], div[role="group"][aria-labelledby], ' +
-        'input[aria-labelledby]:not([aria-hidden="true"],[type="file"]), ' +
-        'textarea[aria-labelledby], input[texts]:not([aria-hidden="true"],[type="file"]), ' +
-        'input[placeholder][inputmode="tel"]:not([aria-hidden="true"],[type="file"]), ' +
+        'input[aria-labelledby]:not([aria-hidden="true"],[type="file"],[type="radio"],[type="checkbox"]), ' +
+        'textarea[aria-labelledby], input[texts]:not([aria-hidden="true"],[type="file"],[type="radio"],[type="checkbox"]), ' +
+        'input[placeholder][inputmode="tel"]:not([aria-hidden="true"],[type="file"],[type="radio"],[type="checkbox"]), ' +
         'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], ' +
-        "textarea, select, div.select-container, " +
-        'fieldset:has(input[type="radio"]), fieldset:has(input[type="checkbox"]), ' +
-        'div:has(input[type="radio"]), div:has(input[type="checkbox"])';
+        "textarea";
 
       // Gather all form fields
       const formElements = [...form.querySelectorAll(FIELDS_SELECTOR)];
@@ -3068,7 +3343,6 @@ class LeverJobAutomation {
           type: "",
           label: "",
           required: false,
-          options: [],
         };
 
         // Get field label/question text
@@ -3127,69 +3401,8 @@ class LeverJobAutomation {
           continue;
         }
 
-        // Determine field type and options
-        switch (el.nodeName) {
-          case "INPUT":
-          case "TEXTAREA":
-            field.type = el.type;
-            // Handle custom dropdowns
-            if (
-              el.nodeName === "INPUT" &&
-              (el.getAttribute("role") === "combobox" ||
-                el.parentElement?.querySelector(".dropdown-icon"))
-            ) {
-              field.type = "select";
-              // Extract options
-              const selectContainer =
-                el.closest('div[data-input-type="select"]') ||
-                el.closest(".select-container") ||
-                el.parentElement;
-              if (selectContainer) {
-                const optionElements = selectContainer.querySelectorAll(
-                  "dialog ul li, .dropdown-options li, .options li"
-                );
-                if (optionElements.length) {
-                  field.options = [...optionElements].map((el) =>
-                    el.textContent.trim()
-                  );
-                }
-              }
-            }
-            break;
-
-          case "SELECT":
-            field.type = "select";
-            field.options = [...el.querySelectorAll("option")].map((opt) =>
-              opt.textContent.trim()
-            );
-            break;
-
-          case "DIV":
-          case "FIELDSET":
-            // Handle radio and checkbox groups
-            const inputs = el.querySelectorAll("input");
-            if (inputs.length > 0) {
-              field.type = inputs[0].type;
-              field.element = [...inputs];
-
-              // Get options from labels
-              if (el.nodeName === "DIV") {
-                field.options = [...el.querySelectorAll("label")].map((l) =>
-                  l.textContent.trim()
-                );
-              } else {
-                field.options = [...inputs].map(
-                  (input) =>
-                    input.closest("label")?.textContent.trim() ||
-                    document
-                      .querySelector(`label[for="${input.id}"]`)
-                      ?.textContent.trim() ||
-                    ""
-                );
-              }
-            }
-            break;
-        }
+        // Determine field type (only text inputs and textareas now)
+        field.type = el.type || el.nodeName.toLowerCase();
 
         this.appendStatusMessage(
           `Processing field: ${field.label} (${field.type})`
@@ -3246,9 +3459,9 @@ class LeverJobAutomation {
         // For all other fields (especially text inputs and textareas), use getAnswer
         else {
           try {
-            // Use getAnswer for most fields, passing the field label, options array, and profile
+            // Use getAnswer for most fields, passing the field label and profile
             debugLog(`Getting AI answer for: "${field.label}"`);
-            value = await this.getAnswer(field.label, field.options, profile);
+            value = await this.getAnswer(field.label, [], profile);
             debugLog(
               `Received answer: ${
                 value
@@ -3271,63 +3484,22 @@ class LeverJobAutomation {
         }
 
         // Skip if no value to fill
-        if (!value) {
-          debugLog(`No value found for field: "${field.label}"`);
+        debugLog("fillApplicationFields: For field label '"+ field.label +"', AI value received:", value, "Field Type:", field.type);
+        if (value === null || value === undefined || value === "") {
+          debugLog("fillApplicationFields: No valid AI value for '"+ field.label +"'. Field will be skipped.");
+          debugLog(`No value (null, undefined, or empty) found for field: "${field.label}", skipping`);
           continue;
         }
 
         this.appendStatusMessage(`Filling field: ${field.label} with value`);
+        debugLog("fillApplicationFields: Attempting to fill '"+ field.label +"' of type '"+field.type+"' with value:", value);
 
-        // Fill the field based on its type
+        // Fill the field (only text inputs and textareas now)
         await this.wait(100);
 
         try {
-          if (field.type === "radio" && Array.isArray(field.element)) {
-            await this.handleRadioButtonSelection(field.element, value);
-          } else if (
-            field.type === "checkbox" &&
-            Array.isArray(field.element)
-          ) {
-            for (const el of field.element) {
-              this.scrollToTargetAdjusted(el, 100);
-              const labelText =
-                el.closest("label")?.textContent.trim() ||
-                document
-                  .querySelector(`label[for="${el.id}"]`)
-                  ?.textContent.trim() ||
-                el.parentNode?.parentNode?.textContent.trim() ||
-                "";
-
-              if (
-                labelText === value ||
-                labelText.toLowerCase() === value.toLowerCase() ||
-                (Array.isArray(value) && value.includes(labelText))
-              ) {
-                // Check the box
-                el.click();
-                await this.wait(300);
-
-                if (!el.checked) {
-                  const labelEl =
-                    el.closest("label") ||
-                    document.querySelector(`label[for="${el.id}"]`);
-                  if (labelEl) {
-                    labelEl.click();
-                    await this.wait(300);
-                  }
-                }
-
-                if (!el.checked) {
-                  el.checked = true;
-                  el.dispatchEvent(new Event("change", { bubbles: true }));
-                }
-              }
-            }
-          } else if (field.type === "select") {
-            await this.handleSelectFieldSelection(field.element, value);
-          } else {
-            await this.setAdvancedInputValue(field.element, value);
-          }
+          debugLog("fillApplicationFields: Attempting to fill '"+ field.label +"' of type '"+field.type+"' with value:", value);
+          await this.setAdvancedInputValue(field.element, value);
         } catch (inputError) {
           debugLog(`Error filling field ${field.label}:`, inputError);
         }
@@ -3379,7 +3551,6 @@ class LeverJobAutomation {
       );
     }
   }
-
   /**
    * Matches a specific question exactly
    */
@@ -3390,50 +3561,6 @@ class LeverJobAutomation {
     const normalizedQuestion = questionFragment.toLowerCase().trim();
 
     return normalizedLabel.includes(normalizedQuestion);
-  }
-
-  /**
-   * Creates a custom "Why join this company" answer based on the question
-   */
-  generateWhyCompanyAnswer(question) {
-    // Try to extract company name from the question
-    let companyName = "";
-    const matches = question.match(
-      /why (?:do you want to|would you like to) work at\s+([^?]+)/i
-    );
-    if (matches && matches[1]) {
-      companyName = matches[1].trim();
-    }
-
-    if (!companyName) {
-      const altMatches = question.match(/why\s+([^?]+)/i);
-      if (
-        altMatches &&
-        altMatches[1] &&
-        (altMatches[1].includes("join") ||
-          altMatches[1].includes("interested") ||
-          altMatches[1].includes("work"))
-      ) {
-        const parts = altMatches[1].split(/\s+/);
-        if (parts.length > 0) {
-          // The last word might be the company name
-          companyName = parts[parts.length - 1];
-        }
-      }
-    }
-
-    if (companyName) {
-      return `I'm particularly interested in joining ${companyName} because of your reputation for innovation and commitment to excellence. After researching your company, I was impressed by your industry leadership and the positive impact you're making. The values and culture at ${companyName} align well with my own professional approach, and I'm excited about the opportunity to contribute to your continued success. I believe my skills and experiences would allow me to make meaningful contributions while also growing professionally in this role.`;
-    }
-
-    return null;
-  }
-
-  /**
-   * Generates an impressive achievement answer
-   */
-  generateImpressionAnswer() {
-    return "One of my most significant accomplishments was leading a cross-functional team on a critical project that faced numerous technical challenges and tight deadlines. Despite these obstacles, I developed a strategic approach that prioritized clear communication and iterative problem-solving. By implementing innovative solutions and fostering a collaborative environment, we not only delivered the project ahead of schedule but also exceeded the initial requirements. This experience reinforced my ability to navigate complex situations, adapt to changing conditions, and deliver meaningful results through both technical expertise and effective leadership.";
   }
 
   /**
@@ -4064,7 +4191,7 @@ class LeverJobAutomation {
       this.appendStatusMessage("Processing radio button fields");
 
       // Extract template data for better understanding of radio fields
-      const templateData = this.extractLeverTemplateData(form);
+      // const templateData = this.extractLeverTemplateData(form); // Keep if needed for other logic, but not for fallback
 
       // Find all multiple-choice question containers
       const radioGroups = form.querySelectorAll(
@@ -4090,7 +4217,7 @@ class LeverJobAutomation {
         if (!radioInputs.length) continue;
 
         // Get the name of the first radio which identifies the group
-        const radioName = radioInputs[0].name;
+        // const radioName = radioInputs[0].name; // Keep if needed for other logic
 
         // Get radio options for passing to getAnswer
         const radioOptions = Array.from(radioInputs).map((input) => {
@@ -4106,116 +4233,49 @@ class LeverJobAutomation {
 
         // Decide what value to use for this radio group
         let selectedValue = null;
-        console.log("RADIO OPTIONS", radioOptions);
+        let answer = null; // Store AI answer
+
         // First try to get answer from AI
         try {
           // Use getAnswer to get the appropriate value
-          const answer = await this.getAnswer(
+          answer = await this.getAnswer(
             questionText,
             radioOptions,
             profile
           );
+          debugLog("handleLeverRadioButtons: Question:", questionText, "AI Answer:", answer);
 
-          // Try to match the answer to one of the radio values or labels
-          for (const radio of radioInputs) {
-            const label = radio.closest("label");
-            const labelText = label ? label.textContent.trim() : "";
+          if (answer) { // Only proceed if AI provided an answer
+            // Try to match the answer to one of the radio values or labels
+            for (const radio of radioInputs) {
+              const label = radio.closest("label");
+              const labelText = label ? label.textContent.trim() : "";
 
-            if (
-              radio.value === answer ||
-              labelText.toLowerCase() === answer.toLowerCase() ||
-              labelText.includes(answer) ||
-              answer.includes(labelText)
-            ) {
-              selectedValue = radio.value;
-              this.appendStatusMessage(
-                `AI selected value: ${selectedValue} for question "${questionText}"`
-              );
-              break;
+              if (
+                (radio.value && radio.value.toLowerCase() === answer.toLowerCase()) ||
+                (labelText && labelText.toLowerCase() === answer.toLowerCase()) ||
+                (labelText && labelText.toLowerCase().includes(answer.toLowerCase())) ||
+                (answer.toLowerCase().includes(labelText.toLowerCase()) && labelText) // Ensure labelText is not empty
+              ) {
+                selectedValue = radio.value;
+                debugLog("handleLeverRadioButtons: Selecting radio for '"+ questionText +"':", selectedValue, "Matched option label/value:", radio.value);
+                this.appendStatusMessage(
+                  `AI selected value: ${selectedValue} for question "${questionText}" based on answer: "${answer}"`
+                );
+                break;
+              }
             }
+          } else {
+            debugLog("handleLeverRadioButtons: No matching radio option or no AI answer for '"+ questionText +"'. Group left untouched.");
+            this.appendStatusMessage(`AI did not provide an answer for "${questionText}", leaving untouched.`);
           }
         } catch (error) {
-          debugLog(`Error getting AI answer for radio group: ${error.message}`);
-          // Continue to fallback logic
+          debugLog(`Error getting AI answer for radio group "${questionText}": ${error.message}`);
+          // Do not apply any fallback, leave untouched
+          this.appendStatusMessage(`Error getting AI answer for "${questionText}", leaving untouched.`);
         }
 
-        // If AI didn't provide a suitable answer, use fallback logic
-        if (!selectedValue) {
-          this.appendStatusMessage("Using fallback logic for radio selection");
-
-          // Handle critical compliance fields with default values
-          if (
-            questionText.includes("legally authorized to work") ||
-            questionText.toLowerCase().includes("authorized") ||
-            questionText.toLowerCase().includes("eligible to work")
-          ) {
-            selectedValue = this.getRadioValueByLabel(radioInputs, "Yes");
-            this.appendStatusMessage(`Setting work authorization to: Yes`);
-          } else if (questionText.includes("require sponsorship")) {
-            selectedValue = this.getRadioValueByLabel(radioInputs, "No");
-            this.appendStatusMessage(`Setting visa sponsorship to: No`);
-          } else if (
-            questionText.toLowerCase().includes("criminal") ||
-            questionText.toLowerCase().includes("convicted")
-          ) {
-            selectedValue = this.getRadioValueByLabel(radioInputs, "No");
-            this.appendStatusMessage(`Setting criminal history to: No`);
-          } else if (
-            questionText.toLowerCase().includes("background check") ||
-            questionText.toLowerCase().includes("background screening") ||
-            questionText.toLowerCase().includes("privacy") ||
-            questionText.toLowerCase().includes("terms and conditions") ||
-            questionText.toLowerCase().includes("18 years")
-          ) {
-            selectedValue = this.getRadioValueByLabel(radioInputs, "Yes");
-            this.appendStatusMessage(`Setting consent field to: Yes`);
-          }
-          // Check template data
-          else if (templateData[radioName]) {
-            const fieldInfo = templateData[radioName];
-
-            // For generic yes/no questions, default to Yes for positive questions
-            // and No for negative questions
-            if (
-              fieldInfo.type === "multiple-choice" &&
-              fieldInfo.options.length === 2 &&
-              fieldInfo.options.some((opt) => opt.text === "Yes") &&
-              fieldInfo.options.some((opt) => opt.text === "No")
-            ) {
-              // Check if question contains negative words
-              const negativeWords = [
-                "not",
-                "criminal",
-                "felony",
-                "misdemeanor",
-                "convict",
-              ];
-              const isNegativeQuestion = negativeWords.some((word) =>
-                questionText.toLowerCase().includes(word)
-              );
-
-              selectedValue = this.getRadioValueByLabel(
-                radioInputs,
-                isNegativeQuestion ? "No" : "Yes"
-              );
-              this.appendStatusMessage(
-                `Setting ${questionText} to: ${
-                  isNegativeQuestion ? "No" : "Yes"
-                } (default assumption)`
-              );
-            }
-          }
-
-          // If we still couldn't determine a value, default to first option
-          if (!selectedValue && radioInputs.length > 0) {
-            selectedValue = radioInputs[0].value;
-            this.appendStatusMessage(
-              `No rule for "${questionText}" - defaulting to first option: ${selectedValue}`
-            );
-          }
-        }
-
-        // Now find and click the radio button with the selected value
+        // Only click if a selectedValue was determined from a clear AI answer
         if (selectedValue) {
           let radioClicked = false;
 
@@ -4259,6 +4319,9 @@ class LeverJobAutomation {
               `Warning: Could not find radio option "${selectedValue}" for question "${questionText}"`
             );
           }
+        } else {
+          // This log is slightly redundant if AI answer was null, but good for clarity if selectedValue is null for other reasons.
+          debugLog("handleLeverRadioButtons: No matching radio option or no AI answer for '"+ questionText +"'. Group left untouched.");
         }
       }
     } catch (error) {
@@ -4367,48 +4430,57 @@ class LeverJobAutomation {
         // Determine a value to select based on the question
         let selectedValue = null;
         let selectedOption = null;
+        let answer = null; // For logging
 
         // First try getting answer from AI
         try {
           // Use getAnswer to determine the best option
-          const answer = await this.getAnswer(
+          answer = await this.getAnswer( // Assign to 'answer'
             questionText,
             selectOptions,
             profile
           );
-          this.appendStatusMessage(`AI suggested answer: ${answer}`);
+          debugLog("handleLeverSelectFields: Question:", questionText, "AI Answer:", answer);
+          this.appendStatusMessage(`AI suggested answer for "${questionText}": ${answer}`);
 
           // Try to match the answer to an option
-          for (const option of select.options) {
-            if (option.value === "" || option.disabled) continue;
+          if (answer) { // Only proceed if AI provided an answer
+            for (const option of select.options) {
+              if (option.value === "" || option.disabled) continue;
 
-            const optionText = option.text.trim();
-            if (
-              optionText.toLowerCase() === answer.toLowerCase() ||
-              optionText.includes(answer) ||
-              answer.includes(optionText)
-            ) {
-              selectedValue = option.value;
-              selectedOption = option;
-              this.appendStatusMessage(`AI matched option: ${optionText}`);
-              break;
+              const optionText = option.text.trim();
+              if (
+                optionText.toLowerCase() === answer.toLowerCase() ||
+                (optionText.includes(answer) && answer.length > 2) || // Be a bit stricter for includes
+                (answer.includes(optionText) && optionText.length > 2)
+              ) {
+                selectedValue = option.value;
+                selectedOption = option;
+                debugLog("handleLeverSelectFields: Selecting option '"+ selectedOption.text +"' for '"+questionText+"'");
+                this.appendStatusMessage(`AI matched option for "${questionText}": ${optionText}`);
+                break;
+              }
             }
-          }
 
-          // If no direct match but answer is a value, try that
-          if (!selectedValue) {
-            const valueOption = Array.from(select.options).find(
-              (opt) =>
-                opt.value && opt.value.toLowerCase() === answer.toLowerCase()
-            );
-
-            if (valueOption) {
-              selectedValue = valueOption.value;
-              selectedOption = valueOption;
-              this.appendStatusMessage(
-                `AI matched by value: ${valueOption.text}`
+            // If no direct match but answer is a value, try that
+            if (!selectedValue) {
+              const valueOption = Array.from(select.options).find(
+                (opt) =>
+                  opt.value && opt.value.toLowerCase() === answer.toLowerCase()
               );
+
+              if (valueOption) {
+                selectedValue = valueOption.value;
+                selectedOption = valueOption;
+                debugLog("handleLeverSelectFields: Selecting option '"+ selectedOption.text +"' for '"+questionText+"'");
+                this.appendStatusMessage(
+                  `AI matched by value for "${questionText}": ${valueOption.text}`
+                );
+              }
             }
+          } else {
+            // AI provided no answer
+            debugLog("handleLeverSelectFields: No matching select option or no AI answer for '"+questionText+"'. Field left untouched.");
           }
         } catch (error) {
           debugLog(
@@ -4417,179 +4489,32 @@ class LeverJobAutomation {
           // Continue to fallback logic
         }
 
-        // If AI didn't provide a suitable answer, use fallback logic
+        // If AI didn't provide a suitable answer, or no clear match was found from the AI's answer
         if (!selectedValue) {
-          this.appendStatusMessage("Using fallback logic for select field");
-          const questionLower = questionText.toLowerCase();
-
-          // Special handling for different types of questions
-
-          // Handle source/referral questions
-          if (
-            questionLower.includes("find") ||
-            questionLower.includes("source") ||
-            questionLower.includes("hear about") ||
-            questionLower.includes("referred") ||
-            questionLower.includes("referral")
-          ) {
-            // For referral source, prefer LinkedIn
-            const linkedInOption = Array.from(select.options).find((opt) =>
-              opt.text.toLowerCase().includes("linkedin")
-            );
-
-            if (linkedInOption) {
-              selectedValue = linkedInOption.value;
-              selectedOption = linkedInOption;
-              this.appendStatusMessage(
-                `Setting referral source to: ${linkedInOption.text}`
-              );
-            } else if (select.options.length > 1) {
-              // Find a reasonable option after the first (which is usually just a placeholder)
-              const reasonableIndex = select.options.length > 2 ? 2 : 1;
-              if (
-                select.options[reasonableIndex] &&
-                select.options[reasonableIndex].value
-              ) {
-                selectedValue = select.options[reasonableIndex].value;
-                selectedOption = select.options[reasonableIndex];
-                this.appendStatusMessage(
-                  `Setting referral source to: ${select.options[reasonableIndex].text}`
-                );
-              }
-            }
-          }
-          // Handle education questions
-          else if (
-            questionLower.includes("university") ||
-            questionLower.includes("school") ||
-            questionLower.includes("college") ||
-            questionLower.includes("education")
-          ) {
-            // If profile has education information, try to match
-            if (profile.education) {
-              // Look for a close match to profile education
-              for (const option of select.options) {
-                if (option.value === "" || option.disabled) continue;
-                if (
-                  option.text
-                    .toLowerCase()
-                    .includes(profile.education.toLowerCase()) ||
-                  profile.education
-                    .toLowerCase()
-                    .includes(option.text.toLowerCase())
-                ) {
-                  selectedValue = option.value;
-                  selectedOption = option;
-                  this.appendStatusMessage(
-                    `Matched education to: ${option.text}`
-                  );
-                  break;
-                }
-              }
-            }
-
-            // If no match found, try to find "Other" option
-            if (!selectedValue) {
-              const otherOption = Array.from(select.options).find((opt) =>
-                opt.text.toLowerCase().includes("other")
-              );
-
-              if (otherOption) {
-                selectedValue = otherOption.value;
-                selectedOption = otherOption;
-                this.appendStatusMessage(
-                  `Using "Other" option for education: ${otherOption.text}`
-                );
-              }
-            }
-          }
-          // Handle diversity, gender, and demographic questions with "prefer not to say" option
-          else if (
-            questionLower.includes("gender") ||
-            questionLower.includes("sex") ||
-            questionLower.includes("race") ||
-            questionLower.includes("ethnicity") ||
-            questionLower.includes("disability") ||
-            questionLower.includes("veteran") ||
-            select.id === "disabilitySelectElement"
-          ) {
-            // Find "prefer not to say" or equivalent option
-            const declineOptions = Array.from(select.options).filter(
-              (opt) =>
-                opt.value !== "" &&
-                !opt.disabled &&
-                (opt.text.toLowerCase().includes("prefer not") ||
-                  opt.text.toLowerCase().includes("decline") ||
-                  opt.text.toLowerCase().includes("not wish") ||
-                  opt.text.toLowerCase().includes("not want to") ||
-                  opt.text.toLowerCase().includes("don't"))
-            );
-
-            if (declineOptions.length > 0) {
-              selectedValue = declineOptions[0].value;
-              selectedOption = declineOptions[0];
-              this.appendStatusMessage(
-                `Setting demographic field to: ${declineOptions[0].text}`
-              );
-            }
-          }
-          // Handle salary/compensation questions
-          else if (
-            questionLower.includes("salary") ||
-            questionLower.includes("compensation") ||
-            questionLower.includes("pay")
-          ) {
-            // For salary expectations, pick a mid-range value if available
-            const options = Array.from(select.options).filter(
-              (opt) => opt.value && !opt.disabled
-            );
-            if (options.length > 2) {
-              // Skip first empty option, choose a slightly above middle option
-              const midIndex = Math.min(
-                Math.floor(options.length * 0.6),
-                options.length - 1
-              );
-              selectedValue = options[midIndex].value;
-              selectedOption = options[midIndex];
-              this.appendStatusMessage(
-                `Setting salary expectation to: ${options[midIndex].text}`
-              );
-            }
-          }
+          debugLog("handleLeverSelectFields: No matching select option or no AI answer for '"+questionText+"'. Field left untouched.");
+          this.appendStatusMessage(
+            `No clear AI match or answer for select field "${questionText}", leaving untouched.`
+          );
         }
 
         this.appendStatusMessage(
-          `Selected value: ${
+          `Final selected option for "${questionText}": ${
             selectedOption
               ? selectedOption.text
-              : selectedValue || "none determined"
+              : selectedValue || "none (left untouched)"
           }`
         );
 
-        // If we've determined a value to use, select it
-        if (selectedValue) {
+        // If we've determined a value to use from AI, select it
+        if (selectedValue && selectedOption) { // Ensure both selectedValue and selectedOption are truthy
           await this.selectOptionByValueEnhanced(select, selectedValue);
-        } else if (select.options.length > 1) {
-          // Default to selecting the first non-empty option
-          const firstNonEmptyOpt = Array.from(select.options).find(
-            (opt) => opt.value && opt.value !== "" && !opt.disabled
-          );
-
-          if (firstNonEmptyOpt) {
-            await this.selectOptionByValueEnhanced(
-              select,
-              firstNonEmptyOpt.value
-            );
-            this.appendStatusMessage(
-              `Selected default option for ${questionText || "field"}: ${
-                firstNonEmptyOpt.text
-              }`
-            );
-          }
         }
+        // No default selection if AI doesn't provide a clear answer or match.
       }
     } catch (error) {
-      debugLog("Error handling Lever select fields:", error);
+      // Ensure questionText is defined for the error log, or use a generic placeholder
+      const qTextForError = typeof questionText !== 'undefined' ? questionText : "unknown select field";
+      debugLog(`Error handling Lever select fields for question "${qTextForError}":`, error);
       this.appendStatusMessage(
         `Warning: Error processing select fields - ${error.message}`
       );
@@ -5022,6 +4947,7 @@ class LeverJobAutomation {
    * This implementation is similar to the LinkedIn platform's getAnswer method
    */
   async getAnswer(label, options = [], profile) {
+    debugLog("getAnswer: Called for label:", label, "Options:", options, "Profile data:", profile);
     try {
       // Normalize the label for better matching
       const normalizedLabel = label.toLowerCase().trim();
@@ -5059,31 +4985,14 @@ class LeverJobAutomation {
       // Cache the answer for future use
       // this.answerCache[normalizedLabel] = data.answer;
 
-      debugLog(`Received AI answer for "${label}": "${data.answer}"`);
+      debugLog("getAnswer: AI response for label '" + label + "':", data.answer);
       return data.answer;
     } catch (error) {
       errorLog("AI Answer Error:", error);
-
-      // Fallback answers if API call fails
-      if (options.length > 0) {
-        // Return first option if options were provided
-        return options[0];
-      } else if (
-        label.toLowerCase().includes("why") &&
-        label.toLowerCase().includes("company")
-      ) {
-        // Fallback for "Why this company" type questions
-        return this.generateWhyCompanyAnswer(label);
-      } else if (
-        label.toLowerCase().includes("salary") ||
-        label.toLowerCase().includes("compensation")
-      ) {
-        // Fallback for salary questions
-        return "Competitive / Market Rate";
-      } else {
-        // Generic fallback
-        return this.generateGenericAnswer(label);
-      }
+      // As per user requirements, do not return fallback or generic answers.
+      // Return null, so the calling function knows AI did not provide an answer.
+      debugLog("getAnswer: API call failed for label '" + label + "'. Returning null.");
+      return null;
     }
   }
 
@@ -5358,8 +5267,8 @@ class LeverJobAutomation {
     // Process form fields
     await this.fillApplicationFields(form, profile);
 
-    // Handle Lever-specific radio buttons
-    await this.handleLeverRadioButtons(form, profile);
+     // Handle Lever-specific radio buttons
+     await this.handleLeverRadioButtons(form, profile);
 
     // Handle Lever-specific select fields
     await this.handleLeverSelectFields(form, profile);
